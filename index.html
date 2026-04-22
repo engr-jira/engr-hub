@@ -1,1056 +1,802 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>ENGR 백과사전 — ESCARE 보안기술팀</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-:root{
-  --bg:#0b1120;--sidebar:#0d1526;--panel:#111c2e;--card:#162035;
-  --border:#1e2d45;--border2:#243450;--accent:#2563eb;--accent2:#3b82f6;
-  --success:#10b981;--warn:#f59e0b;--danger:#ef4444;--purple:#8b5cf6;
-  --text:#e2e8f0;--text2:#94a3b8;--text3:#4a6380;
-  --glow:0 0 20px rgba(37,99,235,0.15);
-}
-body{font-family:'Malgun Gothic','Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
-.hidden{display:none!important}
+import React, { useMemo, useState } from "react";
+import {
+  Search,
+  LayoutDashboard,
+  ListFilter,
+  FileText,
+  BarChart3,
+  Settings,
+  ExternalLink,
+  Sparkles,
+  Bookmark,
+  AlertCircle,
+  Clock3,
+  User,
+  Building2,
+  Shield,
+  CheckCircle2,
+} from "lucide-react";
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  PieChart,
+  Pie,
+  Cell,
+  LineChart,
+  Line,
+  CartesianGrid,
+} from "recharts";
 
-/* ── CONFIG ── */
-#cfg{position:fixed;inset:0;background:radial-gradient(ellipse at 30% 50%,#0d1f45 0%,#060c18 100%);display:flex;align-items:center;justify-content:center;z-index:1000}
-.cfg-wrap{width:100%;max-width:440px;padding:20px}
-.cfg-logo{text-align:center;margin-bottom:32px}
-.cfg-logo .mark{display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;background:linear-gradient(135deg,#1d4ed8,#2563eb);border-radius:16px;margin-bottom:14px;box-shadow:0 0 40px rgba(37,99,235,0.4)}
-.cfg-logo .mark svg{width:32px;height:32px}
-.cfg-logo h1{font-size:26px;font-weight:800;letter-spacing:3px;color:#fff}
-.cfg-logo p{font-size:13px;color:var(--text3);margin-top:6px}
-.cfg-card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:28px;backdrop-filter:blur(10px)}
-.cfg-field{margin-bottom:14px}
-.cfg-field label{display:block;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.8px;margin-bottom:7px}
-.cfg-field input{width:100%;background:#0a1120;border:1px solid var(--border);border-radius:10px;padding:11px 14px;color:var(--text);font-size:13px;outline:none;transition:all .2s;font-family:inherit}
-.cfg-field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.15)}
-.cfg-btn{width:100%;background:linear-gradient(135deg,#1d4ed8,#2563eb);border:none;border-radius:10px;padding:13px;color:#fff;font-size:14px;font-weight:700;cursor:pointer;letter-spacing:.3px;margin-top:6px;transition:opacity .2s;font-family:inherit}
-.cfg-btn:hover{opacity:.9}
-.cfg-note{font-size:11px;color:var(--text3);text-align:center;margin-top:14px;line-height:1.7}
+const issuesSeed = [
+  {
+    key: "SEC-1042",
+    title: "ProxySG to Cloud SWG forwarding intermittent auth mismatch",
+    status: "Open",
+    priority: "High",
+    solution: "Cloud SWG",
+    customer: "Lina Korea",
+    assignee: "MJ",
+    reporter: "민지",
+    created: "2026-04-12",
+    updated: "2026-04-22",
+    resolved: "",
+    summary:
+      "ProxySG explicit proxy forwarding은 동작하나 일부 HTTP 흐름에서 인증 또는 전달 결과 불일치가 관찰됨.",
+    impact:
+      "일부 사용자 세션이 정책 적용 또는 정상 전달에서 제외될 수 있으며, 운영 신뢰도 저하 가능성이 있음.",
+    rootCause:
+      "Forwarding host/port별 동작 차이와 인증 헤더/사용자 식별 전달 방식 차이 가능성.",
+    actions:
+      "WSS forwarding 포트별 동작 비교, access log의 supplier/self 여부 비교, 인증/헤더 주입 정책 분리 확인.",
+    tags: ["ProxySG", "WSS", "Forwarding", "Authentication"],
+    comments: [
+      "HTTPS via WSS 8080 정상, HTTP via 8443 실패 정황 확인.",
+      "supplier=proxy.threatpulse.net 와 supplier=self 케이스를 분리해 비교 필요.",
+    ],
+  },
+  {
+    key: "SEC-1036",
+    title: "Gatelet block policy not triggering for OneDrive rename event",
+    status: "In Progress",
+    priority: "Medium",
+    solution: "CASB Gatelet",
+    customer: "Internal Lab",
+    assignee: "MJ",
+    reporter: "MJ",
+    created: "2026-04-17",
+    updated: "2026-04-21",
+    resolved: "",
+    summary:
+      "Gatelet 정책은 배포되었으나 기대한 rename 차단이 재현되지 않음.",
+    impact:
+      "정책 검증 지연 및 고객 데모 준비 일정 영향 가능.",
+    rootCause:
+      "지원 SaaS/이벤트 범위, 정책 조건, block 옵션 위치 또는 세션 경유 구조 차이 가능성.",
+    actions:
+      "지원 앱/이벤트 재확인, block 관련 토글 확인, 정책 hit 로그와 investigate 결과 대조.",
+    tags: ["CASB", "Gatelet", "OneDrive", "Block"],
+    comments: [
+      "OneDrive for Business 지원 여부와 리스트 노출 여부를 우선 점검.",
+      "Block 설정은 정책 조건 외 추가 활성 항목 존재 가능.",
+    ],
+  },
+  {
+    key: "SEC-1028",
+    title: "DLP syslog automatic response validation error on INCIDENT.MESSAGESOURCE",
+    status: "Resolved",
+    priority: "High",
+    solution: "Symantec DLP",
+    customer: "Customer A",
+    assignee: "Team A",
+    reporter: "MJ",
+    created: "2026-04-08",
+    updated: "2026-04-09",
+    resolved: "2026-04-09",
+    summary:
+      "수동 syslog 전송은 되지만 자동 응답 실행 시 query validation error 발생.",
+    impact:
+      "자동 통보 누락으로 운영 이벤트 대응 지연 가능.",
+    rootCause:
+      "INCIDENT.MESSAGESOURCE 필터 값 누락 또는 잘못된 정책 조건 구성 가능성.",
+    actions:
+      "자동 응답 정책의 필터 값 재확인, 동일 조건 수동 조회 재현, 버전 차이 영향 여부 확인.",
+    tags: ["DLP", "Syslog", "Validation", "Policy"],
+    comments: [
+      "Validation Errors in query: Missing operand value(s) in filter INCIDENT.MESSAGESOURCE",
+      "서버/에이전트 버전 차이는 보조 요인일 수 있으나 1차 원인은 쿼리 조건으로 판단.",
+    ],
+  },
+  {
+    key: "SEC-1019",
+    title: "SEP server TLS 1.0 / 1.1 vulnerability remediation review",
+    status: "Resolved",
+    priority: "Medium",
+    solution: "SEPM",
+    customer: "Lina Korea",
+    assignee: "Security Team",
+    reporter: "Kyung Min",
+    created: "2026-04-17",
+    updated: "2026-04-18",
+    resolved: "2026-04-18",
+    summary:
+      "1433 포트 기준 취약 프로토콜 및 cipher 사용 점검 요청.",
+    impact:
+      "보안 점검 시 Medium/Low 취약점 지속 노출 가능.",
+    rootCause:
+      "SQL Server Schannel/TLS 설정과 cipher suite 허용 범위 영향.",
+    actions:
+      "적용 가능 범위 검토 후 TLS 1.0/1.1 비활성화 및 영향도 점검.",
+    tags: ["SEPM", "TLS", "SQL", "Hardening"],
+    comments: ["포트 1433 대상", "적용 전 호환성 영향 검토 필요"],
+  },
+  {
+    key: "SEC-1007",
+    title: "Inline text detection expectation gap on browser uploads",
+    status: "Open",
+    priority: "Low",
+    solution: "Symantec DLP Endpoint",
+    customer: "Pre-sales",
+    assignee: "MJ",
+    reporter: "MJ",
+    created: "2026-04-14",
+    updated: "2026-04-14",
+    resolved: "",
+    summary:
+      "브라우저 inline 입력과 attachment 채널 탐지 동작 차이 설명 필요.",
+    impact:
+      "고객 기대치와 실제 제품 동작 간 차이로 오해 발생 가능.",
+    rootCause:
+      "브라우저/OS 이벤트 제공 구조와 네트워크 모니터링 범위 차이.",
+    actions:
+      "사용자 설명용 문안과 내부 기술 비교 자료 정리.",
+    tags: ["DLP", "Endpoint", "Browser", "Inline"],
+    comments: ["POST/attachment와 inline event는 관찰 지점이 다름."],
+  },
+];
 
-/* ── APP SHELL ── */
-#app{display:none;height:100vh;flex-direction:row}
+const monthlyTrend = [
+  { month: "Jan", count: 5 },
+  { month: "Feb", count: 8 },
+  { month: "Mar", count: 7 },
+  { month: "Apr", count: 12 },
+  { month: "May", count: 9 },
+  { month: "Jun", count: 11 },
+];
 
-/* ── SIDEBAR ── */
-aside{width:220px;background:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;height:100vh;position:sticky;top:0}
-.sb-top{padding:20px 16px 16px}
-.sb-brand{display:flex;align-items:center;gap:10px;margin-bottom:24px}
-.sb-icon{width:36px;height:36px;background:linear-gradient(135deg,#1d4ed8,#3b82f6);border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.sb-icon svg{width:18px;height:18px}
-.sb-name{font-size:16px;font-weight:800;letter-spacing:2px;color:#fff}
-.sb-sub{font-size:10px;color:var(--text3);font-weight:400;letter-spacing:.3px}
-.sb-section{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:1px;padding:0 12px;margin-bottom:6px}
-.sb-nav{display:flex;flex-direction:column;gap:2px;padding:0 8px}
-.sb-btn{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;border:none;background:none;color:var(--text2);font-size:13px;cursor:pointer;transition:all .2s;font-family:inherit;width:100%;text-align:left}
-.sb-btn svg{width:16px;height:16px;flex-shrink:0;opacity:.7}
-.sb-btn:hover{background:var(--card);color:var(--text)}
-.sb-btn.active{background:rgba(37,99,235,.15);color:var(--accent2)}
-.sb-btn.active svg{opacity:1}
-.sb-divider{height:1px;background:var(--border);margin:14px 16px}
-.sb-bottom{padding:12px 16px;margin-top:auto}
-.sb-status{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
-.sb-status-row{display:flex;justify-content:space-between;align-items:center;font-size:11px;padding:3px 0}
-.sb-status-row span:first-child{color:var(--text3)}
-.dot{width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:4px}
-.dot-green{background:var(--success)}
-.dot-gray{background:var(--text3)}
-.sb-sync-btn{width:100%;margin-top:10px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px;color:var(--text2);font-size:11px;cursor:pointer;font-family:inherit;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:6px}
-.sb-sync-btn:hover{border-color:var(--accent);color:var(--accent)}
+const sidebarItems = [
+  { id: "dashboard", label: "대시보드", icon: LayoutDashboard },
+  { id: "issues", label: "이슈 목록", icon: ListFilter },
+  { id: "detail", label: "이슈 상세", icon: FileText },
+  { id: "reports", label: "리포트 생성", icon: Sparkles },
+  { id: "analytics", label: "통계 분석", icon: BarChart3 },
+  { id: "settings", label: "설정", icon: Settings },
+];
 
-/* ── MAIN ── */
-main{flex:1;overflow-y:auto;display:flex;flex-direction:column;background:var(--bg)}
-
-/* ── TOPBAR ── */
-.topbar{background:var(--sidebar);border-bottom:1px solid var(--border);padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;flex-shrink:0}
-.topbar-left h2{font-size:18px;font-weight:700;color:#fff}
-.topbar-left p{font-size:12px;color:var(--text3);margin-top:1px}
-.topbar-right{display:flex;align-items:center;gap:10px}
-.search-box{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:7px 14px;width:240px}
-.search-box input{background:none;border:none;outline:none;color:var(--text);font-size:12px;width:100%;font-family:inherit}
-.search-box input::placeholder{color:var(--text3)}
-.search-box svg{width:14px;height:14px;color:var(--text3);flex-shrink:0}
-.icon-btn{background:var(--card);border:1px solid var(--border);border-radius:8px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text2);transition:all .2s}
-.icon-btn:hover{border-color:var(--accent);color:var(--accent)}
-.icon-btn svg{width:15px;height:15px}
-
-/* ── CONTENT ── */
-.page{padding:24px;flex:1;display:none}
-.page.active{display:block}
-
-/* ── KPI ── */
-.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:22px}
-.kpi{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px 20px;position:relative;overflow:hidden;transition:border-color .2s}
-.kpi:hover{border-color:var(--border2)}
-.kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--kpi-c1),var(--kpi-c2))}
-.kpi-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;margin-bottom:14px;background:rgba(255,255,255,.05)}
-.kpi-icon svg{width:18px;height:18px}
-.kpi-val{font-size:30px;font-weight:800;color:#fff;line-height:1}
-.kpi-label{font-size:12px;color:var(--text2);margin-top:6px}
-.kpi-sub{font-size:11px;color:var(--text3);margin-top:3px}
-
-/* ── FILTER ── */
-.filter-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;align-items:center}
-.filter-row input,.filter-row select{background:var(--card);border:1px solid var(--border);border-radius:9px;padding:8px 12px;color:var(--text);font-size:12px;outline:none;transition:all .2s;font-family:inherit}
-.filter-row input:focus,.filter-row select:focus{border-color:var(--accent)}
-.filter-row input{flex:1;min-width:180px}
-.filter-count{font-size:12px;color:var(--text3);margin-left:auto;white-space:nowrap}
-
-/* ── TWO-COL ── */
-.two-col{display:grid;grid-template-columns:1fr 380px;gap:16px;align-items:start}
-@media(max-width:1100px){.two-col{grid-template-columns:1fr}}
-
-/* ── ISSUE LIST ── */
-.issue-list{display:flex;flex-direction:column;gap:6px}
-.irow{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--lc,#4a6380);border-radius:10px;padding:13px 15px;cursor:pointer;transition:all .15s}
-.irow:hover{background:var(--panel);border-color:var(--border2)}
-.irow.selected{background:rgba(37,99,235,.08);border-color:var(--accent)}
-.irow-top{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.ikey{font-size:10px;font-weight:800;color:var(--accent2);background:rgba(37,99,235,.12);padding:2px 8px;border-radius:8px;white-space:nowrap}
-.ititle{flex:1;font-size:13px;font-weight:500;color:var(--text);min-width:80px}
-.imeta{font-size:11px;color:var(--text3);white-space:nowrap}
-.irow-bot{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}
-.badge{font-size:10px;padding:2px 8px;border-radius:20px;font-weight:600;white-space:nowrap}
-.more-hint{text-align:center;padding:12px;font-size:11px;color:var(--text3);background:var(--card);border:1px solid var(--border);border-radius:10px;margin-top:6px}
-
-/* ── RIGHT PANEL ── */
-.rpanel{background:var(--panel);border:1px solid var(--border);border-top:3px solid var(--accent);border-radius:14px;padding:20px;position:sticky;top:72px}
-.rp-empty{text-align:center;padding:40px 20px;color:var(--text3)}
-.rp-empty svg{width:40px;height:40px;opacity:.3;margin-bottom:12px}
-.rp-title{font-size:15px;font-weight:700;color:#fff;line-height:1.4;margin-bottom:14px}
-.rp-badges{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:14px}
-.rp-meta{display:flex;flex-direction:column;gap:0;margin-bottom:14px;border:1px solid var(--border);border-radius:10px;overflow:hidden}
-.rp-row{display:flex;padding:7px 12px;border-bottom:1px solid var(--border);font-size:12px}
-.rp-row:last-child{border-bottom:none}
-.rp-row span:first-child{color:var(--text3);width:72px;flex-shrink:0}
-.rp-row span:last-child{color:var(--text);flex:1}
-.rp-desc{font-size:12px;color:var(--text2);line-height:1.75;background:var(--bg);border-radius:8px;padding:12px;margin-bottom:14px;max-height:140px;overflow-y:auto;white-space:pre-wrap}
-.btn-group{display:flex;flex-direction:column;gap:6px}
-.btn{border:none;border-radius:9px;padding:9px 16px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:6px;width:100%}
-.btn svg{width:13px;height:13px}
-.btn-blue{background:linear-gradient(135deg,#1d4ed8,#2563eb);color:#fff}
-.btn-blue:hover{opacity:.9}
-.btn-green{background:linear-gradient(135deg,#059669,#10b981);color:#fff}
-.btn-green:hover{opacity:.9}
-.btn-purple{background:linear-gradient(135deg,#6d28d9,#8b5cf6);color:#fff}
-.btn-purple:hover{opacity:.9}
-.btn-orange{background:linear-gradient(135deg,#b45309,#f59e0b);color:#fff}
-.btn-orange:hover{opacity:.9}
-.btn-ghost{background:var(--card);border:1px solid var(--border);color:var(--text2)}
-.btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
-
-/* ── SECTION TITLE ── */
-.sec-title{font-size:13px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.7px;margin-bottom:14px;display:flex;align-items:center;gap:8px}
-.sec-title::after{content:'';flex:1;height:1px;background:var(--border)}
-
-/* ── AI / RESULT ── */
-.result-box{background:var(--bg);border:1px solid var(--border2);border-radius:12px;padding:18px;margin-top:14px;font-size:13px;line-height:1.85;color:var(--text);white-space:pre-wrap;max-height:500px;overflow-y:auto}
-.loading{display:flex;align-items:center;gap:10px;color:var(--text3);font-size:13px;padding:16px}
-.loading::before{content:'';width:16px;height:16px;border:2px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;flex-shrink:0}
-@keyframes spin{to{transform:rotate(360deg)}}
-
-/* ── REPORT PREVIEW ── */
-.rpt-wrap{background:#f8f7f4;color:#1a1a1a;border-radius:12px;padding:28px;font-family:'Malgun Gothic',Arial,sans-serif;font-size:12px;margin-top:14px}
-.rpt-title{font-size:17px;font-weight:700;color:#185FA5;text-align:center;border-bottom:2.5px solid #185FA5;padding-bottom:12px;margin-bottom:16px}
-.rpt-table{width:100%;border-collapse:collapse;margin-bottom:14px}
-.rpt-table td{border:1px solid #444;padding:5px 9px}
-.rpt-th{background:#185FA5;color:#fff;font-weight:700;text-align:center;width:80px}
-.rpt-sh{background:#E8EEF7;font-weight:700;width:72px}
-.rpt-sec{font-size:13px;font-weight:700;color:#185FA5;border-bottom:2px solid #185FA5;padding-bottom:4px;margin:18px 0 8px}
-.rpt-body{font-size:12px;line-height:1.85;white-space:pre-wrap}
-
-/* ── CHART ── */
-.chart-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-bottom:20px}
-.chart-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}
-.chart-card h4{font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.6px;margin-bottom:14px}
-.bar-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-.bar-lbl{font-size:11px;color:var(--text2);width:90px;text-align:right;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bar-track{flex:1;background:var(--bg);border-radius:5px;height:20px;overflow:hidden}
-.bar-fill{height:100%;border-radius:5px;display:flex;align-items:center;padding-left:8px;transition:width .6s ease}
-.bar-n{font-size:10px;color:#fff;font-weight:700}
-
-/* ── CHECKBOX ── */
-input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px;cursor:pointer}
-
-/* ── META INPUTS ── */
-.meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
-.mf label{display:block;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
-.mf input,.mf select{width:100%;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 11px;color:var(--text);font-size:12px;outline:none;font-family:inherit;transition:all .2s}
-.mf input:focus,.mf select:focus{border-color:var(--accent)}
-
-/* ── COPY BTN ── */
-.copy{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:3px 9px;font-size:10px;color:var(--text3);cursor:pointer;margin-left:6px;transition:all .2s}
-.copy:hover{border-color:var(--accent);color:var(--accent)}
-
-/* ── TOAST ── */
-#toast{position:fixed;bottom:24px;right:24px;background:#10b981;color:#fff;padding:12px 22px;border-radius:12px;font-size:13px;font-weight:700;z-index:9999;display:none;box-shadow:0 8px 30px rgba(0,0,0,.4);animation:slideUp .3s ease}
-@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
-#toast.err{background:#ef4444}
-
-/* ── SCROLLBAR ── */
-::-webkit-scrollbar{width:6px;height:6px}
-::-webkit-scrollbar-track{background:var(--bg)}
-::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
-::-webkit-scrollbar-thumb:hover{background:var(--text3)}
-</style>
-</head>
-<body>
-
-<div id="toast"></div>
-
-<!-- ══ CONFIG ══ -->
-<div id="cfg">
-  <div class="cfg-wrap">
-    <div class="cfg-logo">
-      <div class="mark">
-        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-        </svg>
-      </div>
-      <h1>ENGR</h1>
-      <p>ESCARE 보안기술팀 백과사전</p>
-    </div>
-    <div class="cfg-card">
-      <div class="cfg-field"><label>Jira 도메인</label><input id="c-domain" placeholder="https://company.atlassian.net" value="https://escare-engr.atlassian.net"></div>
-      <div class="cfg-field"><label>Jira 이메일</label><input id="c-email" type="email" placeholder="your@email.com"></div>
-      <div class="cfg-field"><label>Jira API 토큰</label><input id="c-token" type="password" placeholder="ATATxxxxxxxx"></div>
-      <div class="cfg-field"><label>Jira 프로젝트 키</label><input id="c-project" placeholder="ENGR" value="ENGR"></div>
-      <div class="cfg-field"><label>Gemini API 키</label><input id="c-gemini" type="password" placeholder="AIzaxxxxxxxx"></div>
-      <button class="cfg-btn" onclick="saveConfig()">시작하기</button>
-      <p class="cfg-note">입력 정보는 브라우저 로컬에만 저장되며<br>서버로 전송되지 않습니다.</p>
-    </div>
-  </div>
-</div>
-
-<!-- ══ APP ══ -->
-<div id="app">
-  <!-- SIDEBAR -->
-  <aside>
-    <div class="sb-top">
-      <div class="sb-brand">
-        <div class="sb-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-          </svg>
-        </div>
-        <div><div class="sb-name">ENGR</div><div class="sb-sub">Security KB</div></div>
-      </div>
-      <div class="sb-section">메뉴</div>
-      <div class="sb-nav">
-        <button class="sb-btn active" onclick="showPage('dash',this)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-          대시보드
-        </button>
-        <button class="sb-btn" onclick="showPage('issues',this)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
-          이슈 관리
-        </button>
-        <button class="sb-btn" onclick="showPage('kb',this)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
-          KB 생성
-        </button>
-        <button class="sb-btn" onclick="showPage('report',this)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-          리포트 생성
-        </button>
-        <button class="sb-btn" onclick="showPage('ai',this)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
-          AI 분석
-        </button>
-      </div>
-    </div>
-    <div class="sb-divider"></div>
-    <div class="sb-bottom">
-      <div class="sb-status">
-        <div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px">연결 상태</div>
-        <div class="sb-status-row"><span>Jira</span><span id="jira-dot"><span class="dot dot-gray"></span>대기중</span></div>
-        <div class="sb-status-row"><span>Gemini AI</span><span id="gem-dot"><span class="dot dot-gray"></span>대기중</span></div>
-        <div class="sb-status-row"><span>이슈</span><span id="issue-count" style="color:var(--text2)">-</span></div>
-      </div>
-      <button class="sb-sync-btn" onclick="syncJira()">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
-        Jira 새로고침
-      </button>
-      <div style="margin-top:10px;text-align:center">
-        <button onclick="resetConfig()" style="background:none;border:none;font-size:10px;color:var(--text3);cursor:pointer;font-family:inherit">⚙ 설정 변경</button>
-      </div>
-    </div>
-  </aside>
-
-  <!-- MAIN -->
-  <main>
-    <!-- TOPBAR -->
-    <div class="topbar">
-      <div class="topbar-left">
-        <h2 id="page-title">대시보드</h2>
-        <p id="page-desc">Jira 이슈 기반 보안기술팀 허브</p>
-      </div>
-      <div class="topbar-right">
-        <div class="search-box">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input id="global-search" placeholder="이슈 검색..." oninput="onGlobalSearch(this.value)">
-        </div>
-        <div class="icon-btn" onclick="syncJira()" title="새로고침">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
-        </div>
-      </div>
-    </div>
-
-    <!-- ── PAGE: DASHBOARD ── -->
-    <div class="page active" id="page-dash">
-      <div class="kpi-grid" id="kpi-grid">
-        <div class="kpi" style="--kpi-c1:#1d4ed8;--kpi-c2:#3b82f6"><div class="kpi-icon" style="color:#3b82f6"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg></div><div class="kpi-val" id="k-total">-</div><div class="kpi-label">전체 이슈</div><div class="kpi-sub">ENGR 프로젝트</div></div>
-        <div class="kpi" style="--kpi-c1:#059669;--kpi-c2:#10b981"><div class="kpi-icon" style="color:#10b981"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></div><div class="kpi-val" id="k-done">-</div><div class="kpi-label">완료</div><div class="kpi-sub">처리 완료 건</div></div>
-        <div class="kpi" style="--kpi-c1:#1d4ed8;--kpi-c2:#60a5fa"><div class="kpi-icon" style="color:#60a5fa"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div><div class="kpi-val" id="k-prog">-</div><div class="kpi-label">진행중</div><div class="kpi-sub">처리 중인 건</div></div>
-        <div class="kpi" style="--kpi-c1:#b45309;--kpi-c2:#f59e0b"><div class="kpi-icon" style="color:#f59e0b"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div><div class="kpi-val" id="k-high">-</div><div class="kpi-label">High+</div><div class="kpi-sub">높은 우선순위</div></div>
-      </div>
-
-      <div class="chart-grid" id="chart-section"></div>
-
-      <div class="sec-title">최근 이슈 (10건)</div>
-      <div id="dash-list" class="issue-list"></div>
-    </div>
-
-    <!-- ── PAGE: ISSUES ── -->
-    <div class="page" id="page-issues">
-      <div class="filter-row">
-        <input id="f-q" placeholder="이슈 검색 (제목, 내용)..." oninput="renderIssues()">
-        <select id="f-stat" onchange="renderIssues()"><option value="">전체 상태</option><option>완료</option><option>진행 중</option><option>미해결</option></select>
-        <select id="f-pri" onchange="renderIssues()"><option value="">전체 우선순위</option><option>Highest</option><option>High</option><option>Medium</option><option>Low</option></select>
-        <select id="f-lab" onchange="renderIssues()"><option value="">전체 레이블</option><option>DLP</option><option>PP</option><option>SEP</option></select>
-        <span class="filter-count" id="f-count">0건</span>
-      </div>
-      <div class="two-col">
+function StatCard({ title, value, icon: Icon, subtitle }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <div id="issue-list-wrap" class="issue-list"></div>
+          <p className="text-sm text-slate-500">{title}</p>
+          <p className="mt-2 text-3xl font-semibold text-slate-900">{value}</p>
+          <p className="mt-2 text-xs text-slate-500">{subtitle}</p>
         </div>
-        <div id="right-panel">
-          <div class="rpanel">
-            <div class="rp-empty">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
-              <p style="font-size:13px;margin-top:8px">이슈를 선택하면<br>상세 내용이 표시됩니다</p>
-            </div>
-          </div>
+        <div className="rounded-2xl bg-slate-100 p-3">
+          <Icon className="h-5 w-5 text-slate-700" />
         </div>
       </div>
     </div>
-
-    <!-- ── PAGE: KB ── -->
-    <div class="page" id="page-kb">
-      <div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:10px;padding:12px 16px;font-size:12px;color:#6ee7b7;margin-bottom:16px">
-        ✅ 이슈를 선택하면 Broadcom KB 양식으로 문서 초안이 자동 생성됩니다. Confluence 등록은 직접 수행하세요.
-      </div>
-      <div class="filter-row">
-        <input id="kb-q" placeholder="이슈 검색..." oninput="renderKBList()">
-        <select id="kb-stat" onchange="renderKBList()"><option value="">전체 상태</option><option>완료</option><option>진행 중</option></select>
-        <span class="filter-count" id="kb-count">0건</span>
-      </div>
-      <div class="two-col">
-        <div id="kb-list" class="issue-list"></div>
-        <div id="kb-right">
-          <div class="rpanel">
-            <div class="rp-empty" style="color:var(--text3);text-align:center;padding:30px">
-              <p style="font-size:13px">이슈를 클릭하여<br>KB 초안을 생성하세요</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ── PAGE: REPORT ── -->
-    <div class="page" id="page-report">
-      <div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:10px;padding:12px 16px;font-size:12px;color:#fcd34d;margin-bottom:16px">
-        ✋ 이슈를 체크박스로 선택 후 리포트를 생성하세요. Word 다운로드 후 검토하여 고객사에 전달하세요.
-      </div>
-      <div class="meta-grid">
-        <div class="mf"><label>작성자</label><input id="m-author" placeholder="박민준" value="박민준"></div>
-        <div class="mf"><label>직함</label><input id="m-title" placeholder="부장" value="부장"></div>
-        <div class="mf"><label>고객사 담당자</label><input id="m-cust" placeholder="고객사 담당자명"></div>
-        <div class="mf"><label>제품명</label><input id="m-prod" placeholder="Broadcom SEP" value="Broadcom / Symantec Endpoint Protection"></div>
-        <div class="mf"><label>리포트 제목</label><input id="m-rptitle" placeholder="SEPM 장애 이슈보고서"></div>
-        <div class="mf"><label>대상</label><input id="m-target" placeholder="대상 서버/시스템"></div>
-        <div class="mf"><label>보안등급</label><select id="m-sec"><option>내부용</option><option>대외비</option><option>기밀</option></select></div>
-      </div>
-      <div class="filter-row">
-        <input id="rp-q" placeholder="이슈 검색 (제목, 고객사, 내용)..." oninput="renderReportList()">
-        <button onclick="toggleAllReport()" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:7px 14px;color:var(--text2);font-size:12px;cursor:pointer;font-family:inherit">전체 선택/해제</button>
-        <span class="filter-count" id="rp-sel">0건 선택</span>
-      </div>
-      <div id="rp-list" class="issue-list" style="max-height:300px;overflow-y:auto;margin-bottom:14px;border:1px solid var(--border);border-radius:10px;padding:8px"></div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">
-        <button class="btn btn-orange" onclick="genReport()" id="rp-gen-btn">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
-          AI 리포트 생성
-        </button>
-        <button class="btn btn-blue" onclick="downloadReport()" style="width:auto;padding:9px 20px">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Word 다운로드
-        </button>
-        <button class="btn btn-ghost" onclick="togglePreview()" style="width:auto;padding:9px 18px" id="prev-btn">미리보기</button>
-      </div>
-      <div id="rp-ai-result" style="display:none"></div>
-      <div id="rp-preview" style="display:none"></div>
-    </div>
-
-    <!-- ── PAGE: AI ── -->
-    <div class="page" id="page-ai">
-      <div style="background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.2);border-radius:10px;padding:12px 16px;font-size:12px;color:#c4b5fd;margin-bottom:16px">
-        🤖 이슈를 선택하면 Claude/Gemini AI가 기술적 분석과 조치 방안을 제안합니다.
-      </div>
-      <div class="filter-row">
-        <input id="ai-q" placeholder="이슈 검색..." oninput="renderAIList()">
-        <span class="filter-count" id="ai-count">0건</span>
-      </div>
-      <div class="two-col">
-        <div id="ai-list" class="issue-list"></div>
-        <div id="ai-right">
-          <div class="rpanel">
-            <div class="rp-empty" style="color:var(--text3);text-align:center;padding:30px">
-              <p style="font-size:13px">이슈를 클릭하여<br>AI 분석을 요청하세요</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </main>
-</div>
-
-<script>
-// ══ STATE ══
-let CFG={}, ISSUES=[], SEL=null, RP_SEL=new Set(), KB_SEL=null, AI_SEL=null;
-let rpAiText='', showPreview=false;
-
-const SC={'완료':'#10b981','진행 중':'#3b82f6','미해결':'#94a3b8','보류':'#f59e0b'};
-const PC={'Highest':'#ef4444','High':'#f97316','Medium':'#f59e0b','Low':'#10b981'};
-const LC={'DLP':'#ef4444','PP':'#3b82f6','SEP':'#10b981'};
-
-function fd(d){return d?new Date(d).toLocaleDateString('ko-KR',{year:'2-digit',month:'2-digit',day:'2-digit'}):'-';}
-function toast(msg,err){const t=document.getElementById('toast');t.textContent=msg;t.className=err?'err':'';t.style.display='block';setTimeout(()=>t.style.display='none',2500);}
-function copyText(text){navigator.clipboard.writeText(text).then(()=>toast('복사됐어요!')).catch(()=>{});}
-
-// ══ CONFIG & AUTH ══
-function showCfgMode(mode){
-  document.getElementById('cfg-admin').style.display=mode==='admin'?'block':'none';
-  document.getElementById('cfg-join').style.display=mode==='join'?'block':'none';
-  document.getElementById('cfg-pin').style.display=mode==='pin'?'block':'none';
-  document.getElementById('cfg-choose').style.display=mode==='choose'?'flex':'none';
+  );
 }
 
-function adminSave(){
-  const d=document.getElementById('c-domain').value.trim();
-  const e=document.getElementById('c-email').value.trim();
-  const t=document.getElementById('c-token').value.trim();
-  const p=document.getElementById('c-project').value.trim();
-  const g=document.getElementById('c-gemini').value.trim();
-  const pin=document.getElementById('c-pin').value.trim();
-  if(!d||!e||!t||!p||!g||!pin){toast('모든 항목을 입력해주세요',true);return;}
-  if(pin.length<4){toast('PIN은 4자리 이상이어야 합니다',true);return;}
-  CFG={domain:d,email:e,token:t,project:p,gemini:g};
-  const code=btoa(unescape(encodeURIComponent(JSON.stringify(CFG))));
-  const pinHash=simpleHash(pin);
-  localStorage.setItem('engr_cfg',JSON.stringify(CFG));
-  localStorage.setItem('engr_pin',pinHash);
-  localStorage.setItem('engr_code',code);
-  // 팀 참여 코드 표시
-  document.getElementById('join-code-box').textContent=code;
-  document.getElementById('join-code-area').style.display='block';
-  toast('설정 완료! 팀 참여 코드를 팀원에게 공유하세요.');
+function SectionCard({ title, action, children }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+        {action ? <div>{action}</div> : null}
+      </div>
+      {children}
+    </div>
+  );
 }
 
-function adminEnter(){
-  document.getElementById('cfg').style.display='none';
-  document.getElementById('app').style.display='flex';
-  syncJira();
+function Badge({ children, tone = "default" }) {
+  const styles = {
+    default: "bg-slate-100 text-slate-700",
+    open: "bg-amber-100 text-amber-800",
+    progress: "bg-sky-100 text-sky-800",
+    resolved: "bg-emerald-100 text-emerald-800",
+    high: "bg-rose-100 text-rose-800",
+    medium: "bg-violet-100 text-violet-800",
+    low: "bg-slate-100 text-slate-700",
+  };
+  return (
+    <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${styles[tone] || styles.default}`}>
+      {children}
+    </span>
+  );
 }
 
-function joinSave(){
-  const code=document.getElementById('j-code').value.trim();
-  const pin=document.getElementById('j-pin').value.trim();
-  if(!code||!pin){toast('참여 코드와 PIN을 입력해주세요',true);return;}
-  try{
-    const decoded=JSON.parse(decodeURIComponent(escape(atob(code))));
-    if(!decoded.domain||!decoded.email){throw new Error('잘못된 코드');}
-    // PIN 검증
-    const saved=localStorage.getItem('engr_pin');
-    if(saved&&saved!==simpleHash(pin)){toast('PIN이 올바르지 않습니다',true);return;}
-    if(!saved){
-      // 첫 팀원 — PIN 저장
-      localStorage.setItem('engr_pin',simpleHash(pin));
+export default function EscareSecurityEncyclopediaMVP() {
+  const [page, setPage] = useState("dashboard");
+  const [search, setSearch] = useState("");
+  const [solutionFilter, setSolutionFilter] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [selectedIssueKey, setSelectedIssueKey] = useState(issuesSeed[0].key);
+  const [selectedKeys, setSelectedKeys] = useState([issuesSeed[0].key, issuesSeed[1].key]);
+  const [reportType, setReportType] = useState("고객사 공유용");
+
+  const filteredIssues = useMemo(() => {
+    return issuesSeed.filter((issue) => {
+      const q = search.trim().toLowerCase();
+      const hitSearch =
+        !q ||
+        issue.key.toLowerCase().includes(q) ||
+        issue.title.toLowerCase().includes(q) ||
+        issue.customer.toLowerCase().includes(q) ||
+        issue.solution.toLowerCase().includes(q) ||
+        issue.tags.join(" ").toLowerCase().includes(q);
+      const hitSolution = solutionFilter === "All" || issue.solution === solutionFilter;
+      const hitStatus = statusFilter === "All" || issue.status === statusFilter;
+      return hitSearch && hitSolution && hitStatus;
+    });
+  }, [search, solutionFilter, statusFilter]);
+
+  const selectedIssue = useMemo(() => {
+    return issuesSeed.find((issue) => issue.key === selectedIssueKey) || issuesSeed[0];
+  }, [selectedIssueKey]);
+
+  const stats = useMemo(() => {
+    const openCount = issuesSeed.filter((i) => i.status === "Open").length;
+    const progressCount = issuesSeed.filter((i) => i.status === "In Progress").length;
+    const resolvedCount = issuesSeed.filter((i) => i.status === "Resolved").length;
+
+    const bySolution = Array.from(
+      issuesSeed.reduce((map, issue) => {
+        map.set(issue.solution, (map.get(issue.solution) || 0) + 1);
+        return map;
+      }, new Map())
+    ).map(([name, value]) => ({ name, value }));
+
+    const byStatus = [
+      { name: "Open", value: openCount },
+      { name: "In Progress", value: progressCount },
+      { name: "Resolved", value: resolvedCount },
+    ];
+
+    return { openCount, progressCount, resolvedCount, bySolution, byStatus };
+  }, []);
+
+  const reportText = useMemo(() => {
+    const picked = issuesSeed.filter((issue) => selectedKeys.includes(issue.key));
+    if (!picked.length) return "선택된 이슈가 없습니다.";
+
+    if (reportType === "고객사 공유용") {
+      return picked
+        .map(
+          (issue, idx) =>
+            `${idx + 1}. ${issue.title}\n- 이슈 키: ${issue.key}\n- 현재 상태: ${issue.status}\n- 개요: ${issue.summary}\n- 영향 범위: ${issue.impact}\n- 조치 방향: ${issue.actions}`
+        )
+        .join("\n\n");
     }
-    CFG=decoded;
-    localStorage.setItem('engr_cfg',JSON.stringify(CFG));
-    localStorage.setItem('engr_code',code);
-    document.getElementById('cfg').style.display='none';
-    document.getElementById('app').style.display='flex';
-    syncJira();
-    toast('접속 완료!');
-  }catch(e){toast('참여 코드가 올바르지 않습니다',true);}
-}
 
-function pinLogin(){
-  const pin=document.getElementById('p-pin').value.trim();
-  if(!pin){toast('PIN을 입력해주세요',true);return;}
-  const saved=localStorage.getItem('engr_pin');
-  if(saved!==simpleHash(pin)){toast('PIN이 올바르지 않습니다',true);return;}
-  const cfg=localStorage.getItem('engr_cfg');
-  if(!cfg){toast('설정을 찾을 수 없습니다',true);showCfgMode('choose');return;}
-  CFG=JSON.parse(cfg);
-  document.getElementById('cfg').style.display='none';
-  document.getElementById('app').style.display='flex';
-  syncJira();
-}
-
-function simpleHash(str){
-  let h=0;for(let i=0;i<str.length;i++){h=Math.imul(31,h)+str.charCodeAt(i)|0;}return h.toString(36);
-}
-
-function resetConfig(){
-  if(!confirm('설정을 초기화하면 다시 설정해야 합니다. 계속하시겠어요?'))return;
-  localStorage.removeItem('engr_cfg');
-  localStorage.removeItem('engr_pin');
-  localStorage.removeItem('engr_code');
-  location.reload();
-}
-
-// ══ PAGE NAV ══
-const pageTitles={dash:['대시보드','Jira 이슈 기반 보안기술팀 허브'],issues:['이슈 관리','전체 이슈 목록 및 상세 조회'],kb:['KB 생성','이슈 기반 Knowledge Base 자동 생성'],report:['리포트 생성','고객사 기술지원 이슈 보고서'],ai:['AI 분석','Claude AI 기술 분석 및 조치 방안']};
-function showPage(id,btn){
-  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  document.getElementById('page-'+id).classList.add('active');
-  document.querySelectorAll('.sb-btn').forEach(b=>b.classList.remove('active'));
-  btn.classList.add('active');
-  const t=pageTitles[id];
-  document.getElementById('page-title').textContent=t[0];
-  document.getElementById('page-desc').textContent=t[1];
-  if(id==='issues')renderIssues();
-  if(id==='kb')renderKBList();
-  if(id==='report')renderReportList();
-  if(id==='ai')renderAIList();
-}
-
-// ══ JIRA SYNC ══
-async function syncJira(){
-  document.getElementById('jira-dot').innerHTML='<span class="dot" style="background:#f59e0b"></span>동기화중...';
-  try{
-    const b64=btoa(CFG.email+':'+CFG.token);
-    const url=`${CFG.domain}/rest/api/3/search?jql=project%3D${CFG.project}%20ORDER%20BY%20created%20DESC&maxResults=100&fields=summary,status,priority,assignee,reporter,created,updated,description,labels,issuetype`;
-    const r=await fetch(url,{headers:{Authorization:'Basic '+b64,'Content-Type':'application/json'}});
-    if(!r.ok)throw new Error('Jira API 오류: '+r.status);
-    const d=await r.json();
-    ISSUES=d.issues.map(i=>({
-      key:i.key,
-      title:i.fields.summary,
-      status:i.fields.status.name,
-      pri:i.fields.priority?i.fields.priority.name:'Medium',
-      assignee:i.fields.assignee?i.fields.assignee.displayName:'-',
-      reporter:i.fields.reporter?i.fields.reporter.displayName:'-',
-      labels:i.fields.labels||[],
-      date:i.fields.created?i.fields.created.slice(0,10):'',
-      updated:i.fields.updated?i.fields.updated.slice(0,10):'',
-      desc:extractDesc(i.fields.description),
-      type:i.fields.issuetype?i.fields.issuetype.name:'작업',
-      customer:extractCustomer(i.fields.summary)
-    }));
-    document.getElementById('jira-dot').innerHTML='<span class="dot dot-green"></span><span style="color:#10b981">연결됨</span>';
-    document.getElementById('gem-dot').innerHTML='<span class="dot dot-green"></span><span style="color:#10b981">준비됨</span>';
-    document.getElementById('issue-count').textContent=ISSUES.length+'건';
-    renderDash();
-    toast('Jira 동기화 완료! '+ISSUES.length+'건');
-  }catch(e){
-    document.getElementById('jira-dot').innerHTML='<span class="dot" style="background:#ef4444"></span><span style="color:#ef4444">오류</span>';
-    toast('Jira 연결 실패: '+e.message,true);
-  }
-}
-
-function extractDesc(desc){
-  if(!desc||!desc.content)return '';
-  const texts=[];
-  function walk(nodes){if(!nodes)return;nodes.forEach(n=>{if(n.type==='text'&&n.text)texts.push(n.text);if(n.content)walk(n.content);});}
-  walk(desc.content);
-  return texts.join(' ').slice(0,600);
-}
-function extractCustomer(title){
-  const m=title.match(/\[([^\]]+)\]/);
-  return m?m[1]:'';
-}
-
-// ══ DASH ══
-function renderDash(){
-  const total=ISSUES.length;
-  const done=ISSUES.filter(i=>i.status==='완료').length;
-  const prog=ISSUES.filter(i=>['진행 중','진행중','In Progress'].includes(i.status)).length;
-  const high=ISSUES.filter(i=>['High','Highest'].includes(i.pri)).length;
-  document.getElementById('k-total').textContent=total;
-  document.getElementById('k-done').textContent=done;
-  document.getElementById('k-prog').textContent=prog;
-  document.getElementById('k-high').textContent=high;
-
-  // 차트
-  const cusCnt={}, labCnt={}, priCnt={};
-  ISSUES.forEach(i=>{
-    if(i.customer)cusCnt[i.customer]=(cusCnt[i.customer]||0)+1;
-    i.labels.forEach(l=>{labCnt[l]=(labCnt[l]||0)+1;});
-    priCnt[i.pri]=(priCnt[i.pri]||0)+1;
-  });
-  const maxC=Math.max(1,...Object.values(cusCnt));
-  const maxL=Math.max(1,...Object.values(labCnt));
-
-  document.getElementById('chart-section').innerHTML=`
-    <div class="chart-card">
-      <h4>고객사별 분포</h4>
-      ${Object.entries(cusCnt).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([k,v])=>`
-        <div class="bar-row">
-          <div class="bar-lbl" title="${k}">${k}</div>
-          <div class="bar-track"><div class="bar-fill" style="width:${Math.round(v/maxC*100)}%;background:linear-gradient(90deg,#1d4ed8,#3b82f6)"><span class="bar-n">${v}</span></div></div>
-        </div>`).join('')}
-    </div>
-    <div class="chart-card">
-      <h4>레이블별 분포</h4>
-      ${Object.entries(labCnt).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`
-        <div class="bar-row">
-          <div class="bar-lbl">${k}</div>
-          <div class="bar-track"><div class="bar-fill" style="width:${Math.round(v/maxL*100)}%;background:${LC[k]||'#3b82f6'}88"><span class="bar-n">${v}</span></div></div>
-        </div>`).join('')}
-    </div>
-    <div class="chart-card">
-      <h4>우선순위별</h4>
-      ${['Highest','High','Medium','Low'].map(p=>{const v=priCnt[p]||0;return`
-        <div class="bar-row">
-          <div class="bar-lbl">${p}</div>
-          <div class="bar-track"><div class="bar-fill" style="width:${Math.round(v/Math.max(1,...Object.values(priCnt))*100)}%;background:${PC[p]||'#94a3b8'}88"><span class="bar-n">${v}</span></div></div>
-        </div>`;}).join('')}
-    </div>
-  `;
-
-  const dl=document.getElementById('dash-list');
-  dl.innerHTML=ISSUES.slice(0,10).map(i=>issueRowHTML(i,false)).join('');
-  dl.querySelectorAll('.irow').forEach((el,idx)=>{el.onclick=()=>{showPage('issues',document.querySelectorAll('.sb-btn')[1]);SEL=ISSUES[idx];renderIssues();renderRightPanel();};});
-}
-
-// ══ ISSUES ══
-function filteredIssues(){
-  const q=(document.getElementById('f-q')||{}).value?.toLowerCase()||'';
-  const st=(document.getElementById('f-stat')||{}).value||'';
-  const pr=(document.getElementById('f-pri')||{}).value||'';
-  const lb=(document.getElementById('f-lab')||{}).value||'';
-  return ISSUES.filter(i=>{
-    if(q&&!i.title.toLowerCase().includes(q)&&!i.desc.toLowerCase().includes(q))return false;
-    if(st&&i.status!==st)return false;
-    if(pr&&i.pri!==pr)return false;
-    if(lb&&!i.labels.includes(lb))return false;
-    return true;
-  });
-}
-function renderIssues(){
-  const fi=filteredIssues();
-  document.getElementById('f-count').textContent=fi.length+'건';
-  const wrap=document.getElementById('issue-list-wrap');
-  wrap.innerHTML=fi.map(i=>issueRowHTML(i,true,SEL&&SEL.key===i.key)).join('');
-  if(fi.length>20)wrap.innerHTML+=`<div class="more-hint">+${fi.length-20}건 더 있어요 — 필터로 범위를 좁혀주세요</div>`;
-  wrap.querySelectorAll('.irow').forEach((el,idx)=>{el.onclick=()=>{SEL=fi[idx];renderIssues();renderRightPanel();};});
-}
-
-function issueRowHTML(i,clickable,selected){
-  const sc=SC[i.status]||'#94a3b8';
-  const pc=PC[i.pri]||'#94a3b8';
-  return `<div class="irow${selected?' selected':''}" style="--lc:${sc}">
-    <div class="irow-top">
-      <span class="ikey">${i.key}</span>
-      <span class="badge" style="background:${sc}22;color:${sc}">${i.status}</span>
-      <span class="badge" style="background:${pc}22;color:${pc}">${i.pri}</span>
-      <span class="ititle">${i.title}</span>
-      <span class="imeta">${fd(i.date)}</span>
-    </div>
-    <div class="irow-bot">
-      ${i.labels.map(l=>`<span class="badge" style="background:${(LC[l]||'#94a3b8')}22;color:${LC[l]||'#94a3b8'}">${l}</span>`).join('')}
-      ${i.customer?`<span class="badge" style="background:rgba(37,99,235,.12);color:var(--accent2)">${i.customer}</span>`:''}
-      ${i.assignee&&i.assignee!=='-'?`<span class="imeta">@${i.assignee}</span>`:''}
-    </div>
-  </div>`;
-}
-
-function renderRightPanel(){
-  if(!SEL)return;
-  const i=SEL;
-  const sc=SC[i.status]||'#94a3b8';
-  const pc=PC[i.pri]||'#94a3b8';
-  document.getElementById('right-panel').innerHTML=`
-    <div class="rpanel">
-      <div class="rp-title">${i.title}</div>
-      <div class="rp-badges">
-        <span class="badge" style="background:${sc}22;color:${sc}">${i.status}</span>
-        <span class="badge" style="background:${pc}22;color:${pc}">${i.pri}</span>
-        ${i.labels.map(l=>`<span class="badge" style="background:${(LC[l]||'#94a3b8')}22;color:${LC[l]||'#94a3b8'}">${l}</span>`).join('')}
-      </div>
-      <div class="rp-meta">
-        <div class="rp-row"><span>이슈키</span><span style="color:var(--accent2);font-weight:700">${i.key}</span></div>
-        <div class="rp-row"><span>담당자</span><span>${i.assignee}</span></div>
-        <div class="rp-row"><span>보고자</span><span>${i.reporter}</span></div>
-        <div class="rp-row"><span>고객사</span><span>${i.customer||'-'}</span></div>
-        <div class="rp-row"><span>접수일</span><span>${fd(i.date)}</span></div>
-        <div class="rp-row"><span>수정일</span><span>${fd(i.updated)}</span></div>
-        <div class="rp-row"><span>유형</span><span>${i.type}</span></div>
-      </div>
-      ${i.desc?`<div class="rp-desc">${i.desc}</div>`:''}
-      <div class="btn-group">
-        <button class="btn btn-blue" onclick="goKB('${i.key}')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
-          KB 문서 생성
-        </button>
-        <button class="btn btn-green" onclick="goReport('${i.key}')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          리포트 생성
-        </button>
-        <button class="btn btn-purple" onclick="goAI('${i.key}')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
-          AI 분석
-        </button>
-        <a href="${CFG.domain}/browse/${i.key}" target="_blank" style="text-decoration:none">
-          <button class="btn btn-ghost">Jira에서 보기 →</button>
-        </a>
-      </div>
-    </div>`;
-}
-
-function goKB(key){KB_SEL=ISSUES.find(i=>i.key===key);showPage('kb',document.querySelectorAll('.sb-btn')[2]);renderKBList();renderKBRight();}
-function goReport(key){RP_SEL=new Set([key]);showPage('report',document.querySelectorAll('.sb-btn')[3]);renderReportList();}
-function goAI(key){AI_SEL=ISSUES.find(i=>i.key===key);showPage('ai',document.querySelectorAll('.sb-btn')[4]);renderAIList();renderAIRight();}
-
-// ══ KB ══
-function renderKBList(){
-  const q=(document.getElementById('kb-q')||{}).value?.toLowerCase()||'';
-  const st=(document.getElementById('kb-stat')||{}).value||'';
-  const fi=ISSUES.filter(i=>{
-    if(q&&!i.title.toLowerCase().includes(q))return false;
-    if(st&&i.status!==st)return false;
-    return true;
-  });
-  document.getElementById('kb-count').textContent=fi.length+'건';
-  const wrap=document.getElementById('kb-list');
-  wrap.innerHTML=fi.map(i=>issueRowHTML(i,true,KB_SEL&&KB_SEL.key===i.key)).join('');
-  wrap.querySelectorAll('.irow').forEach((el,idx)=>{el.onclick=()=>{KB_SEL=fi[idx];renderKBList();renderKBRight();};});
-}
-function renderKBRight(){
-  if(!KB_SEL)return;
-  const i=KB_SEL;
-  document.getElementById('kb-right').innerHTML=`
-    <div class="rpanel">
-      <div class="rp-title">${i.title}</div>
-      <div class="rp-badges">
-        <span class="badge" style="background:rgba(37,99,235,.12);color:var(--accent2)">${i.key}</span>
-        <span class="badge" style="background:${(SC[i.status]||'#94a3b8')}22;color:${SC[i.status]||'#94a3b8'}">${i.status}</span>
-      </div>
-      ${i.desc?`<div class="rp-desc">${i.desc}</div>`:''}
-      <button class="btn btn-green" id="kb-gen-btn" onclick="genKB()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
-        KB 초안 생성
-      </button>
-      <div id="kb-result"></div>
-    </div>`;
-}
-async function genKB(){
-  if(!KB_SEL)return;
-  const btn=document.getElementById('kb-gen-btn');
-  const res=document.getElementById('kb-result');
-  btn.disabled=true;btn.textContent='생성 중...';
-  res.innerHTML='<div class="loading">Gemini AI가 KB 초안을 작성하고 있어요...</div>';
-  try{
-    const text=await callGemini(`당신은 Broadcom/Symantec 보안 솔루션 전문가입니다. 아래 Jira 이슈를 Broadcom Knowledge Base 스타일로 KB 문서 초안을 한국어로 작성하세요.
-
-반드시 아래 섹션 구조를 따르세요:
-
-Article ID: ${KB_SEL.key}
-Title: [이슈 제목 기반 KB 제목]
-
-## 증상 (Symptom)
-[문제 현상 설명]
-
-## 원인 (Cause)
-[원인 분석]
-
-## 해결 방법 (Resolution)
-[단계별 해결 방법]
-
-## 추가 정보 (Additional Information)
-[참고사항, 관련 KB, 재발방지]
-
-이슈 정보:
-키: ${KB_SEL.key}
-제목: ${KB_SEL.title}
-고객사: ${KB_SEL.customer}
-레이블: ${KB_SEL.labels.join(',')}
-상태: ${KB_SEL.status}
-내용: ${KB_SEL.desc}`);
-    res.innerHTML=`
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;margin-bottom:6px">
-        <span style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.5px">KB 초안</span>
-        <button class="copy" onclick="copyText(this.dataset.t)" data-t="${text.replace(/"/g,'&quot;')}">복사</button>
-      </div>
-      <div class="result-box">${text}</div>
-      <a href="https://escare-engr.atlassian.net/wiki/spaces/ENGRKB/overview" target="_blank" style="text-decoration:none;margin-top:8px;display:block">
-        <button class="btn btn-ghost" style="font-size:11px;padding:7px">Confluence에서 등록 →</button>
-      </a>`;
-  }catch(e){res.innerHTML=`<div style="color:#ef4444;font-size:12px;margin-top:10px">오류: ${e.message}</div>`;}
-  btn.disabled=false;btn.textContent='KB 초안 생성';
-}
-
-// ══ REPORT ══
-function renderReportList(){
-  const q=(document.getElementById('rp-q')||{}).value?.toLowerCase()||'';
-  const fi=ISSUES.filter(i=>!q||(i.title.toLowerCase().includes(q)||i.customer.toLowerCase().includes(q)||i.desc.toLowerCase().includes(q)));
-  document.getElementById('rp-sel').textContent=RP_SEL.size+'건 선택';
-  document.getElementById('rp-list').innerHTML=fi.map(i=>`
-    <div class="irow" style="--lc:${SC[i.status]||'#94a3b8'};cursor:default">
-      <div class="irow-top">
-        <input type="checkbox" ${RP_SEL.has(i.key)?'checked':''} onchange="toggleRP('${i.key}',this.checked)">
-        <span class="ikey">${i.key}</span>
-        <span class="badge" style="background:${(SC[i.status]||'#94a3b8')}22;color:${SC[i.status]||'#94a3b8'}">${i.status}</span>
-        <span class="ititle">${i.title}</span>
-        ${i.customer?`<span class="badge" style="background:rgba(37,99,235,.12);color:var(--accent2)">${i.customer}</span>`:''}
-        <span class="imeta">${fd(i.date)}</span>
-      </div>
-    </div>`).join('');
-}
-function toggleRP(key,on){if(on)RP_SEL.add(key);else RP_SEL.delete(key);document.getElementById('rp-sel').textContent=RP_SEL.size+'건 선택';}
-function toggleAllReport(){
-  if(RP_SEL.size===ISSUES.length){RP_SEL.clear();}else{ISSUES.forEach(i=>RP_SEL.add(i.key));}
-  renderReportList();
-}
-async function genReport(){
-  if(!RP_SEL.size){toast('이슈를 선택해주세요',true);return;}
-  const sel=ISSUES.filter(i=>RP_SEL.has(i.key));
-  const btn=document.getElementById('rp-gen-btn');
-  btn.disabled=true;btn.textContent='생성 중...';
-  const res=document.getElementById('rp-ai-result');
-  res.style.display='block';
-  res.innerHTML='<div class="loading">Gemini AI가 리포트를 작성하고 있어요...</div>';
-  const list=sel.map((i,n)=>`${n+1}. [${i.key}] ${i.title}\n   - 고객사: ${i.customer} | 일자: ${i.date} | 상태: ${i.status}\n   - 내용: ${i.desc}`).join('\n\n');
-  try{
-    rpAiText=await callGemini(`당신은 ESCARE 보안기술팀의 이슈보고서 작성 전문가입니다. 아래 이슈 목록으로 공식 이슈보고서의 세 섹션을 한국어로 작성하세요.
-
-반드시 아래 형식 그대로 출력하세요:
-
-이슈 사항
-1. [첫 번째 이슈 요약]
-2. [두 번째 이슈 요약]
-
-확인 내용
-1. [첫 번째 이슈 확인 내용 - 날짜, 증상, 분석, 조치 내용, 결과 포함]
-2. [두 번째 이슈 확인 내용]
-
-추후 진행안
-1. [추후 조치 또는 완료 기재]
-
-이슈 목록 (${sel.length}건):
-${list}`);
-    res.innerHTML=`
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.5px">AI 생성 내용</span>
-        <button class="copy" onclick="copyText(this.dataset.t)" data-t="${rpAiText.replace(/"/g,'&quot;')}">복사</button>
-      </div>
-      <div class="result-box">${rpAiText}</div>`;
-  }catch(e){res.innerHTML=`<div style="color:#ef4444;font-size:12px">오류: ${e.message}</div>`;}
-  btn.disabled=false;btn.textContent='AI 리포트 생성';
-}
-function togglePreview(){
-  const pv=document.getElementById('rp-preview');
-  showPreview=!showPreview;
-  document.getElementById('prev-btn').textContent=showPreview?'미리보기 닫기':'미리보기';
-  if(!showPreview){pv.style.display='none';return;}
-  const sel=ISSUES.filter(i=>RP_SEL.has(i.key));
-  const today=new Date().toLocaleDateString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit'});
-  const customers=[...new Set(sel.map(i=>i.customer).filter(Boolean))].join(', ');
-  const rptTitle=document.getElementById('m-rptitle').value||sel.map(i=>i.title).slice(0,2).join(' / ');
-  const secs=rpAiText?rpAiText.split(/\n\n(?=이슈 사항|확인 내용|추후 진행안)/)
-    :['이슈 사항\n(AI 리포트 생성 버튼을 클릭하세요)','확인 내용\n','추후 진행안\n'];
-  pv.style.display='block';
-  pv.innerHTML=`<div class="rpt-wrap">
-    <div class="rpt-title">${rptTitle||'이슈보고서'}</div>
-    <table class="rpt-table">
-      <tr><td class="rpt-th">회사명</td><td class="rpt-th">담당자</td><td class="rpt-th">확인</td></tr>
-      <tr><td style="text-align:center">에스케어</td><td style="text-align:center">${document.getElementById('m-author').value} ${document.getElementById('m-title').value}</td><td rowspan="2" style="text-align:center;font-size:10px;color:#999">(서명)</td></tr>
-      <tr><td style="text-align:center">${customers||'고객사'}</td><td style="text-align:center">${document.getElementById('m-cust').value||'담당자'}</td></tr>
-    </table>
-    <table class="rpt-table">
-      <tr><td class="rpt-sh">작성자</td><td>${document.getElementById('m-author').value} ${document.getElementById('m-title').value}</td><td class="rpt-sh">작성일</td><td>${today}</td></tr>
-      <tr><td class="rpt-sh">제품명</td><td colspan="3">${document.getElementById('m-prod').value}</td></tr>
-      <tr><td class="rpt-sh">제목</td><td colspan="3">${rptTitle}</td></tr>
-      <tr><td class="rpt-sh">대상</td><td colspan="3">${document.getElementById('m-target').value||customers}</td></tr>
-    </table>
-    ${secs.map(s=>{const lines=s.trim().split('\n');return`<div class="rpt-sec">${lines[0]}</div><div class="rpt-body">${lines.slice(1).join('\n')}</div>`;}).join('')}
-    <p style="margin-top:24px;font-size:10px;color:#999;text-align:right">※ 본 문서는 ${document.getElementById('m-sec').value}이며 무단 배포를 금합니다.</p>
-  </div>`;
-}
-function downloadReport(){
-  const sel=ISSUES.filter(i=>RP_SEL.has(i.key));
-  if(!sel.length){toast('이슈를 선택해주세요',true);return;}
-  const today=new Date().toLocaleDateString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit'});
-  const customers=[...new Set(sel.map(i=>i.customer).filter(Boolean))].join(', ');
-  const rptTitle=document.getElementById('m-rptitle').value||sel.map(i=>i.title).slice(0,2).join(' / ');
-  const secs=rpAiText?rpAiText.split(/\n\n(?=이슈 사항|확인 내용|추후 진행안)/)
-    :['이슈 사항\n(AI 리포트 생성 후 내용이 채워집니다)','확인 내용\n','추후 진행안\n'];
-  const html=`<!DOCTYPE html><html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><style>
-    @page{size:A4;margin:2cm}body{font-family:'맑은 고딕',Arial,sans-serif;font-size:10pt;line-height:1.6}
-    table{border-collapse:collapse;width:100%;margin-bottom:14px}td{border:1px solid #333;padding:5px 8px;font-size:9.5pt}
-    .th{background:#185FA5;color:white;font-weight:bold;text-align:center;width:80px}
-    .sh{background:#E8EEF7;font-weight:bold;width:70px}
-    .title{font-size:17pt;font-weight:bold;color:#185FA5;text-align:center;border-bottom:2.5px solid #185FA5;padding-bottom:12px;margin-bottom:16px}
-    h2{font-size:12pt;font-weight:bold;color:#185FA5;border-bottom:2px solid #185FA5;padding-bottom:4px;margin-top:20px;margin-bottom:8px}
-    p{white-space:pre-wrap;font-size:10pt;line-height:1.85}
-  </style></head><body>
-    <div class="title">${rptTitle}</div>
-    <table><tr><td class="th">회사명</td><td class="th">담당자</td><td class="th">확인</td></tr>
-    <tr><td style="text-align:center">에스케어</td><td style="text-align:center">${document.getElementById('m-author').value} ${document.getElementById('m-title').value}</td><td rowspan="2" style="text-align:center;font-size:9pt;color:#999">(서명)</td></tr>
-    <tr><td style="text-align:center">${customers}</td><td style="text-align:center">${document.getElementById('m-cust').value||''}</td></tr></table>
-    <table><tr><td class="sh">작성자</td><td>${document.getElementById('m-author').value} ${document.getElementById('m-title').value}</td><td class="sh">작성일</td><td>${today}</td></tr>
-    <tr><td class="sh">제품명</td><td colspan="3">${document.getElementById('m-prod').value}</td></tr>
-    <tr><td class="sh">제목</td><td colspan="3">${rptTitle}</td></tr>
-    <tr><td class="sh">대상</td><td colspan="3">${document.getElementById('m-target').value||customers}</td></tr></table>
-    ${secs.map(s=>{const lines=s.trim().split('\n');return`<h2>${lines[0]}</h2><p>${lines.slice(1).join('\n')}</p>`;}).join('')}
-    <p style="margin-top:30px;font-size:9pt;color:#999;text-align:right">※ 본 문서는 ${document.getElementById('m-sec').value}이며 무단 배포를 금합니다.</p>
-  </body></html>`;
-  const blob=new Blob(['\ufeff'+html],{type:'application/msword'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-  a.download='이슈보고서_'+customers+'_'+today.replace(/\./g,'')+'.doc';
-  document.body.appendChild(a);a.click();document.body.removeChild(a);
-  toast('Word 파일 다운로드 완료!');
-}
-
-// ══ AI ══
-function renderAIList(){
-  const q=(document.getElementById('ai-q')||{}).value?.toLowerCase()||'';
-  const fi=ISSUES.filter(i=>!q||(i.title.toLowerCase().includes(q)||i.desc.toLowerCase().includes(q)));
-  document.getElementById('ai-count').textContent=fi.length+'건';
-  const wrap=document.getElementById('ai-list');
-  wrap.innerHTML=fi.map(i=>issueRowHTML(i,true,AI_SEL&&AI_SEL.key===i.key)).join('');
-  wrap.querySelectorAll('.irow').forEach((el,idx)=>{el.onclick=()=>{AI_SEL=fi[idx];renderAIList();renderAIRight();};});
-}
-function renderAIRight(){
-  if(!AI_SEL)return;
-  const i=AI_SEL;
-  document.getElementById('ai-right').innerHTML=`
-    <div class="rpanel">
-      <div class="rp-title">${i.title}</div>
-      <div class="rp-badges">
-        <span class="badge" style="background:rgba(37,99,235,.12);color:var(--accent2)">${i.key}</span>
-        <span class="badge" style="background:${(SC[i.status]||'#94a3b8')}22;color:${SC[i.status]||'#94a3b8'}">${i.status}</span>
-        ${i.labels.map(l=>`<span class="badge" style="background:${(LC[l]||'#94a3b8')}22;color:${LC[l]||'#94a3b8'}">${l}</span>`).join('')}
-      </div>
-      ${i.desc?`<div class="rp-desc">${i.desc}</div>`:''}
-      <div class="btn-group">
-        <button class="btn btn-purple" id="ai-analyze-btn" onclick="runAI('analyze')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          기술 분석 요청
-        </button>
-        <button class="btn btn-orange" id="ai-mail-btn" onclick="runAI('mail')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-          고객사 메일 작성
-        </button>
-      </div>
-      <div id="ai-result-box"></div>
-    </div>`;
-}
-async function runAI(mode){
-  if(!AI_SEL)return;
-  const i=AI_SEL;
-  const btn=document.getElementById(mode==='analyze'?'ai-analyze-btn':'ai-mail-btn');
-  const res=document.getElementById('ai-result-box');
-  btn.disabled=true;
-  res.innerHTML='<div class="loading">AI가 분석하고 있어요...</div>';
-  try{
-    let prompt='';
-    if(mode==='analyze'){
-      prompt=`당신은 ESCARE 보안기술팀의 Symantec/Broadcom 보안 솔루션 전문가입니다.
-아래 이슈를 분석하여 4개 섹션으로 한국어 기술 분석을 제공하세요:
-
-**🔍 상황 분석**
-(이슈 성격, 심각도, 기술적 배경)
-
-**🧩 원인 및 기술 포인트**
-(추정 원인, 핵심 기술 이슈, 관련 컴포넌트)
-
-**⚡ 권장 조치**
-(우선순위별 구체적 조치 방법)
-
-**🛡 재발 방지**
-(정책 개선, 모니터링 항목, 예방 방안)
-
-이슈 정보:
-키: ${i.key} | 제목: ${i.title}
-고객사: ${i.customer} | 솔루션: ${i.labels.join(',')}
-우선순위: ${i.pri} | 상태: ${i.status}
-내용: ${i.desc}`;
-    }else{
-      prompt=`당신은 ESCARE 보안기술팀의 고객 커뮤니케이션 전문가입니다.
-아래 이슈에 대해 고객사에 전달할 공식 이메일을 한국어로 작성하세요.
-
-형식:
-수신: [고객사 담당자]님
-발신: 에스케어 보안기술팀 박민준
-
-제목: [이슈 제목] 관련 지원 내역 공유
-
-[정중한 인사]
-[지원 일시, 방식, 담당자]
-[이슈 내용 요약]
-[조치/확인 내용]
-[결과 및 향후 계획]
-[마무리 인사]
-
-에스케어 박민준 드림
-
-이슈 정보:
-키: ${i.key} | 제목: ${i.title}
-고객사: ${i.customer} | 상태: ${i.status}
-내용: ${i.desc}`;
+    if (reportType === "내부 검토용") {
+      return picked
+        .map(
+          (issue, idx) =>
+            `${idx + 1}. ${issue.key} / ${issue.title}\n[확인된 사실]\n- ${issue.summary}\n[추정 원인]\n- ${issue.rootCause}\n[영향 범위]\n- ${issue.impact}\n[현실적 조치안]\n- ${issue.actions}`
+        )
+        .join("\n\n");
     }
-    const text=await callGemini(prompt);
-    res.innerHTML=`
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;margin-bottom:6px">
-        <span style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.5px">${mode==='analyze'?'AI 분석 결과':'고객사 메일 초안'}</span>
-        <button class="copy" onclick="copyText(this.dataset.t)" data-t="${text.replace(/"/g,'&quot;')}">복사</button>
+
+    return picked
+      .map(
+        (issue, idx) =>
+          `${idx + 1}. ${issue.key} ${issue.title}\n- 솔루션: ${issue.solution}\n- 고객사: ${issue.customer}\n- 상태: ${issue.status}`
+      )
+      .join("\n\n");
+  }, [selectedKeys, reportType]);
+
+  const statusTone = (status) => {
+    if (status === "Open") return "open";
+    if (status === "In Progress") return "progress";
+    if (status === "Resolved") return "resolved";
+    return "default";
+  };
+
+  const priorityTone = (priority) => {
+    if (priority === "High") return "high";
+    if (priority === "Medium") return "medium";
+    return "low";
+  };
+
+  const solutions = ["All", ...Array.from(new Set(issuesSeed.map((i) => i.solution)))];
+  const statuses = ["All", ...Array.from(new Set(issuesSeed.map((i) => i.status)))];
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <div className="grid min-h-screen grid-cols-12">
+        <aside className="col-span-12 border-b border-slate-200 bg-slate-950 p-4 text-white lg:col-span-2 lg:border-b-0 lg:border-r">
+          <div className="mb-6 flex items-center gap-3">
+            <div className="rounded-2xl bg-white/10 p-2">
+              <Shield className="h-6 w-6" />
+            </div>
+            <div>
+              <p className="text-sm text-slate-300">ESCARE</p>
+              <h1 className="text-lg font-semibold">보안기술팀 백과사전</h1>
+            </div>
+          </div>
+
+          <nav className="space-y-2">
+            {sidebarItems.map((item) => {
+              const Icon = item.icon;
+              const active = page === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => setPage(item.id)}
+                  className={`flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left transition ${
+                    active ? "bg-white text-slate-950" : "text-slate-300 hover:bg-white/10 hover:text-white"
+                  }`}
+                >
+                  <Icon className="h-5 w-5" />
+                  <span className="text-sm font-medium">{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-4">
+            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">MVP Status</p>
+            <p className="mt-2 text-sm text-slate-200">JIRA 기반 조회/분석/리포트 화면 초안</p>
+            <div className="mt-4 flex items-center gap-2 text-xs text-emerald-300">
+              <CheckCircle2 className="h-4 w-4" />
+              프론트 MVP 동작형
+            </div>
+          </div>
+        </aside>
+
+        <main className="col-span-12 p-5 lg:col-span-10 lg:p-8">
+          <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <h2 className="text-2xl font-semibold tracking-tight">{sidebarItems.find((x) => x.id === page)?.label}</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                보안 기술 이슈를 검색하고, 분석하고, 재사용 가능한 형태로 정리하는 내부 포털 MVP
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                <Search className="h-4 w-4 text-slate-400" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="이슈 키, 제목, 고객사, 태그 검색"
+                  className="w-full min-w-[260px] border-0 bg-transparent text-sm outline-none placeholder:text-slate-400"
+                />
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm">
+                사용자: MJ
+              </div>
+            </div>
+          </div>
+
+          {page === "dashboard" && (
+            <div className="space-y-6">
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <StatCard title="전체 이슈" value={issuesSeed.length} icon={FileText} subtitle="현재 MVP 샘플 데이터 기준" />
+                <StatCard title="미해결" value={stats.openCount + stats.progressCount} icon={AlertCircle} subtitle="Open + In Progress" />
+                <StatCard title="해결 완료" value={stats.resolvedCount} icon={CheckCircle2} subtitle="Resolved 상태 기준" />
+                <StatCard title="내 담당 이슈" value={issuesSeed.filter((i) => i.assignee === "MJ").length} icon={User} subtitle="Assignee = MJ" />
+              </div>
+
+              <div className="grid gap-6 xl:grid-cols-3">
+                <div className="xl:col-span-2">
+                  <SectionCard title="월별 이슈 추이">
+                    <div className="h-80">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={monthlyTrend}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="month" />
+                          <YAxis allowDecimals={false} />
+                          <Tooltip />
+                          <Line type="monotone" dataKey="count" stroke="#0f172a" strokeWidth={3} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </SectionCard>
+                </div>
+                <div>
+                  <SectionCard title="상태별 분포">
+                    <div className="h-80">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie data={stats.byStatus} dataKey="value" nameKey="name" outerRadius={90} innerRadius={50}>
+                            {stats.byStatus.map((entry, index) => (
+                              <Cell key={entry.name} fill={["#f59e0b", "#0ea5e9", "#10b981"][index % 3]} />
+                            ))}
+                          </Pie>
+                          <Tooltip />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </SectionCard>
+                </div>
+              </div>
+
+              <div className="grid gap-6 xl:grid-cols-2">
+                <SectionCard title="솔루션별 이슈 수">
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={stats.bySolution}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="name" />
+                        <YAxis allowDecimals={false} />
+                        <Tooltip />
+                        <Bar dataKey="value" fill="#1e293b" radius={[8, 8, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </SectionCard>
+
+                <SectionCard title="최근 주요 이슈">
+                  <div className="space-y-3">
+                    {issuesSeed.slice(0, 4).map((issue) => (
+                      <button
+                        key={issue.key}
+                        onClick={() => {
+                          setSelectedIssueKey(issue.key);
+                          setPage("detail");
+                        }}
+                        className="w-full rounded-2xl border border-slate-200 p-4 text-left transition hover:border-slate-300 hover:bg-slate-50"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-900">{issue.key}</p>
+                            <p className="mt-1 text-sm text-slate-700">{issue.title}</p>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              <Badge tone={statusTone(issue.status)}>{issue.status}</Badge>
+                              <Badge tone={priorityTone(issue.priority)}>{issue.priority}</Badge>
+                            </div>
+                          </div>
+                          <ExternalLink className="h-4 w-4 text-slate-400" />
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </SectionCard>
+              </div>
+            </div>
+          )}
+
+          {page === "issues" && (
+            <div className="grid gap-6 xl:grid-cols-12">
+              <div className="xl:col-span-3">
+                <SectionCard title="필터">
+                  <div className="space-y-4">
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-slate-700">솔루션</label>
+                      <select
+                        value={solutionFilter}
+                        onChange={(e) => setSolutionFilter(e.target.value)}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none"
+                      >
+                        {solutions.map((s) => (
+                          <option key={s}>{s}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-slate-700">상태</label>
+                      <select
+                        value={statusFilter}
+                        onChange={(e) => setStatusFilter(e.target.value)}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none"
+                      >
+                        {statuses.map((s) => (
+                          <option key={s}>{s}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">
+                      현재는 MVP 샘플 데이터 기준 필터입니다. 이후 JIRA 실제 필드와 연결하면 고객사, 담당자, 기간, 우선순위 등으로 확장할 수 있습니다.
+                    </div>
+                  </div>
+                </SectionCard>
+              </div>
+
+              <div className="xl:col-span-9">
+                <SectionCard
+                  title="이슈 목록"
+                  action={<div className="text-sm text-slate-500">총 {filteredIssues.length}건</div>}
+                >
+                  <div className="overflow-hidden rounded-2xl border border-slate-200">
+                    <div className="grid grid-cols-12 gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      <div className="col-span-2">이슈 키</div>
+                      <div className="col-span-4">제목</div>
+                      <div className="col-span-2">솔루션</div>
+                      <div className="col-span-2">고객사</div>
+                      <div className="col-span-2">상태</div>
+                    </div>
+                    <div className="divide-y divide-slate-200 bg-white">
+                      {filteredIssues.map((issue) => (
+                        <button
+                          key={issue.key}
+                          onClick={() => {
+                            setSelectedIssueKey(issue.key);
+                            setPage("detail");
+                          }}
+                          className="grid w-full grid-cols-12 gap-2 px-4 py-4 text-left transition hover:bg-slate-50"
+                        >
+                          <div className="col-span-2 text-sm font-semibold text-slate-900">{issue.key}</div>
+                          <div className="col-span-4 text-sm text-slate-700">{issue.title}</div>
+                          <div className="col-span-2 text-sm text-slate-600">{issue.solution}</div>
+                          <div className="col-span-2 text-sm text-slate-600">{issue.customer}</div>
+                          <div className="col-span-2">
+                            <Badge tone={statusTone(issue.status)}>{issue.status}</Badge>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </SectionCard>
+              </div>
+            </div>
+          )}
+
+          {page === "detail" && (
+            <div className="grid gap-6 xl:grid-cols-12">
+              <div className="xl:col-span-8 space-y-6">
+                <SectionCard
+                  title={`${selectedIssue.key} · ${selectedIssue.title}`}
+                  action={
+                    <button className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700">
+                      <ExternalLink className="h-4 w-4" /> 원본 JIRA
+                    </button>
+                  }
+                >
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-2xl bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">상태</p>
+                      <div className="mt-2"><Badge tone={statusTone(selectedIssue.status)}>{selectedIssue.status}</Badge></div>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">우선순위</p>
+                      <div className="mt-2"><Badge tone={priorityTone(selectedIssue.priority)}>{selectedIssue.priority}</Badge></div>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">고객사</p>
+                      <p className="mt-2 text-sm font-medium text-slate-900">{selectedIssue.customer}</p>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">솔루션</p>
+                      <p className="mt-2 text-sm font-medium text-slate-900">{selectedIssue.solution}</p>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 grid gap-4 md:grid-cols-2">
+                    <div className="rounded-2xl border border-slate-200 p-4">
+                      <div className="flex items-center gap-2 text-sm font-semibold text-slate-800"><User className="h-4 w-4" /> 담당 / 보고</div>
+                      <p className="mt-2 text-sm text-slate-600">Assignee: {selectedIssue.assignee}</p>
+                      <p className="text-sm text-slate-600">Reporter: {selectedIssue.reporter}</p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 p-4">
+                      <div className="flex items-center gap-2 text-sm font-semibold text-slate-800"><Clock3 className="h-4 w-4" /> 일정</div>
+                      <p className="mt-2 text-sm text-slate-600">Created: {selectedIssue.created}</p>
+                      <p className="text-sm text-slate-600">Updated: {selectedIssue.updated}</p>
+                      <p className="text-sm text-slate-600">Resolved: {selectedIssue.resolved || "-"}</p>
+                    </div>
+                  </div>
+                </SectionCard>
+
+                <SectionCard title="이슈 요약">
+                  <div className="space-y-4 text-sm leading-7 text-slate-700">
+                    <div>
+                      <p className="font-semibold text-slate-900">개요</p>
+                      <p className="mt-1">{selectedIssue.summary}</p>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-slate-900">영향 범위</p>
+                      <p className="mt-1">{selectedIssue.impact}</p>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-slate-900">조치 방향</p>
+                      <p className="mt-1">{selectedIssue.actions}</p>
+                    </div>
+                  </div>
+                </SectionCard>
+
+                <SectionCard title="주요 코멘트 타임라인">
+                  <div className="space-y-3">
+                    {selectedIssue.comments.map((comment, idx) => (
+                      <div key={idx} className="rounded-2xl border border-slate-200 p-4 text-sm text-slate-700">
+                        {comment}
+                      </div>
+                    ))}
+                  </div>
+                </SectionCard>
+              </div>
+
+              <div className="xl:col-span-4 space-y-6">
+                <SectionCard title="AI 분석 카드">
+                  <div className="space-y-4 text-sm text-slate-700">
+                    <div>
+                      <p className="font-semibold text-slate-900">기술 원인</p>
+                      <p className="mt-1">{selectedIssue.rootCause}</p>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-slate-900">현실적 조치안</p>
+                      <p className="mt-1">{selectedIssue.actions}</p>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-4 text-xs leading-6 text-slate-600">
+                      확인된 사실과 추정 원인을 분리하는 구조를 기본 템플릿으로 적용했습니다.
+                    </div>
+                  </div>
+                </SectionCard>
+
+                <SectionCard title="태그 / 관련 포인트">
+                  <div className="flex flex-wrap gap-2">
+                    {selectedIssue.tags.map((tag) => (
+                      <Badge key={tag}>{tag}</Badge>
+                    ))}
+                  </div>
+                </SectionCard>
+
+                <SectionCard title="유사 이슈 추천">
+                  <div className="space-y-3">
+                    {issuesSeed
+                      .filter((i) => i.key !== selectedIssue.key && i.solution === selectedIssue.solution)
+                      .slice(0, 3)
+                      .map((issue) => (
+                        <button
+                          key={issue.key}
+                          onClick={() => setSelectedIssueKey(issue.key)}
+                          className="w-full rounded-2xl border border-slate-200 p-4 text-left transition hover:bg-slate-50"
+                        >
+                          <p className="text-sm font-semibold text-slate-900">{issue.key}</p>
+                          <p className="mt-1 text-sm text-slate-600">{issue.title}</p>
+                        </button>
+                      ))}
+                  </div>
+                </SectionCard>
+              </div>
+            </div>
+          )}
+
+          {page === "reports" && (
+            <div className="grid gap-6 xl:grid-cols-12">
+              <div className="xl:col-span-4">
+                <SectionCard title="입력 조건">
+                  <div className="space-y-4">
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-slate-700">출력 유형</label>
+                      <select
+                        value={reportType}
+                        onChange={(e) => setReportType(e.target.value)}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none"
+                      >
+                        <option>고객사 공유용</option>
+                        <option>내부 검토용</option>
+                        <option>주간 보고용</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <p className="mb-2 text-sm font-medium text-slate-700">대상 이슈</p>
+                      <div className="space-y-2">
+                        {issuesSeed.map((issue) => {
+                          const checked = selectedKeys.includes(issue.key);
+                          return (
+                            <label key={issue.key} className="flex items-start gap-3 rounded-2xl border border-slate-200 p-3 text-sm">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => {
+                                  setSelectedKeys((prev) =>
+                                    prev.includes(issue.key)
+                                      ? prev.filter((k) => k !== issue.key)
+                                      : [...prev, issue.key]
+                                  );
+                                }}
+                                className="mt-1"
+                              />
+                              <div>
+                                <p className="font-medium text-slate-900">{issue.key}</p>
+                                <p className="text-slate-600">{issue.title}</p>
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </SectionCard>
+              </div>
+
+              <div className="xl:col-span-8">
+                <SectionCard
+                  title="생성 결과 미리보기"
+                  action={<button className="rounded-xl bg-slate-950 px-4 py-2 text-sm font-medium text-white">복사</button>}
+                >
+                  <div className="rounded-2xl bg-slate-950 p-5 text-sm leading-7 text-slate-100 whitespace-pre-wrap">
+                    {reportText}
+                  </div>
+                </SectionCard>
+              </div>
+            </div>
+          )}
+
+          {page === "analytics" && (
+            <div className="grid gap-6 xl:grid-cols-2">
+              <SectionCard title="솔루션별 분포">
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={stats.bySolution}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="name" />
+                      <YAxis allowDecimals={false} />
+                      <Tooltip />
+                      <Bar dataKey="value" fill="#0f172a" radius={[8, 8, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </SectionCard>
+
+              <SectionCard title="상태별 분포">
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={stats.byStatus} dataKey="value" nameKey="name" outerRadius={100}>
+                        {stats.byStatus.map((entry, index) => (
+                          <Cell key={entry.name} fill={["#f59e0b", "#0ea5e9", "#10b981"][index % 3]} />
+                        ))}
+                      </Pie>
+                      <Tooltip />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              </SectionCard>
+            </div>
+          )}
+
+          {page === "settings" && (
+            <div className="grid gap-6 xl:grid-cols-2">
+              <SectionCard title="기본 설정">
+                <div className="space-y-4 text-sm text-slate-700">
+                  <div className="rounded-2xl border border-slate-200 p-4">
+                    <p className="font-medium text-slate-900">기본 기간</p>
+                    <p className="mt-1 text-slate-600">이번 달</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 p-4">
+                    <p className="font-medium text-slate-900">기본 리포트 유형</p>
+                    <p className="mt-1 text-slate-600">내부 검토용</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 p-4">
+                    <p className="font-medium text-slate-900">AI 저장 정책</p>
+                    <p className="mt-1 text-slate-600">사용자 승인 시 저장</p>
+                  </div>
+                </div>
+              </SectionCard>
+
+              <SectionCard title="운영 메모">
+                <div className="space-y-4 text-sm leading-7 text-slate-700">
+                  <div className="rounded-2xl bg-slate-50 p-4">
+                    현재 버전은 프론트엔드 MVP입니다. 다음 단계는 실제 JIRA 필드 매핑과 백엔드/API 연결입니다.
+                  </div>
+                  <div className="rounded-2xl bg-slate-50 p-4">
+                    이후 조직 계정 인증, 즐겨찾기 저장, 템플릿 관리, 실제 통계 데이터 적재 구조를 확장할 수 있습니다.
+                  </div>
+                </div>
+              </SectionCard>
+            </div>
+          )}
+        </main>
       </div>
-      <div class="result-box">${text}</div>`;
-  }catch(e){res.innerHTML=`<div style="color:#ef4444;font-size:12px;margin-top:10px">오류: ${e.message}</div>`;}
-  btn.disabled=false;
+    </div>
+  );
 }
-
-// ══ GEMINI API ══
-async function callGemini(prompt){
-  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${CFG.gemini}`,{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.7,maxOutputTokens:2000}})
-  });
-  if(!r.ok)throw new Error('Gemini API 오류: '+r.status);
-  const d=await r.json();
-  return d.candidates?.[0]?.content?.parts?.[0]?.text||'응답 없음';
-}
-
-// ══ GLOBAL SEARCH ══
-function onGlobalSearch(q){
-  document.getElementById('f-q').value=q;
-  showPage('issues',document.querySelectorAll('.sb-btn')[1]);
-  renderIssues();
-}
-
-// ══ INIT ══
-window.onload=function(){
-  const cfg=localStorage.getItem('engr_cfg');
-  const pin=localStorage.getItem('engr_pin');
-  if(cfg&&pin){
-    // 재방문 → PIN 입력만
-    showCfgMode('pin');
-  }else if(cfg&&!pin){
-    // 설정은 있는데 PIN 없음 (비정상) → 초기화
-    localStorage.clear();showCfgMode('choose');
-  }else{
-    showCfgMode('choose');
-  }
-};
-</script>
-</body>
-</html>

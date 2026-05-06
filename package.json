@@ -1,0 +1,10 @@
+{
+  "scripts": {
+    "prepare:prod": "node scripts/prepare-prod.js",
+    "check:worker": "npx wrangler deploy --dry-run --keep-vars",
+    "deploy:worker": "npx wrangler deploy --keep-vars"
+  },
+  "devDependencies": {
+    "wrangler": "^4.88.0"
+  }
+}

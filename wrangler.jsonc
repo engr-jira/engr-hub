@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "engr-hub-proxy",
+  "main": "worker.js",
+  "compatibility_date": "2026-05-06",
+  "workers_dev": true,
+  "preview_urls": false,
+  "ai": {
+    "binding": "AI"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "ENGR_KV",
+      "id": "82629753261d41869b55bbd652c17ce1"
+    }
+  ]
+}

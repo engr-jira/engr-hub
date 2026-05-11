@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>ENGR AI v1.5.9 - ESCARE Security Hub</title>
+<title>ENGR AI v1.6.0 - ESCARE Security Hub</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%236366f1'/%3E%3Cpath d='M32 12 14 22l18 10 18-10-18-10Zm-18 22 18 10 18-10M14 44l18 10 18-10' fill='none' stroke='white' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
@@ -114,6 +114,12 @@ main{flex:1;overflow-y:auto;display:flex;flex-direction:column}
   .topbar-right{width:100%;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.topbar-right>*{min-width:0}
   .page{padding:14px}.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.dash-focus{grid-template-columns:1fr!important}
   .filter-row input,.filter-row select{width:100%;min-width:0}.two-col{grid-template-columns:1fr}
+  /* 업무링크 리스트 모바일: 카테고리+제목만 표시 */
+  .link-desc,.link-url,.link-meta{display:none!important}
+  .link-card{gap:8px;min-height:38px;padding:6px 10px}
+  .link-cat{min-width:52px!important;font-size:8px}
+  /* 터치 기기: 액션 버튼 항상 표시 */
+  .link-card .link-actions{opacity:1!important}
 }
 .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px}
 .kpi{background:linear-gradient(145deg,#242840,#1e2136);border:1px solid var(--border2);border-radius:14px;padding:18px;position:relative;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.2)}
@@ -168,6 +174,23 @@ main{flex:1;overflow-y:auto;display:flex;flex-direction:column}
 .rp-comment-item{padding:10px 12px;background:rgba(255,255,255,.02);border-left:3px solid var(--accent2);border-radius:0 8px 8px 0;margin-bottom:6px;font-size:11.5px}
 .rp-comment-author{font-size:10px;color:var(--accent3);font-weight:700;margin-bottom:4px}
 .rp-comment-body{color:var(--text2);line-height:1.6;white-space:pre-wrap}
+.item-comments{margin-top:14px;border-top:1px solid var(--border);padding-top:12px}
+.item-comments h4{font-size:11px;color:var(--text3);font-weight:900;margin-bottom:8px}
+.item-comment{background:rgba(255,255,255,.035);border:1px solid var(--border);border-left:3px solid var(--accent2);border-radius:0 10px 10px 0;padding:9px 11px;margin-bottom:7px}
+.item-comment-meta{display:flex;justify-content:space-between;gap:8px;font-size:10px;color:var(--text3);font-weight:800;margin-bottom:5px}
+.item-comment-body{font-size:12px;color:var(--text2);line-height:1.6;white-space:pre-wrap}
+.item-comment-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:10px}
+.item-comment-form textarea{min-height:48px!important;resize:vertical}
+.item-comment-del{border:0;background:transparent;color:var(--danger);font-size:13px;cursor:pointer;padding:0 2px}
+.comment-feed{display:none;margin:0 0 14px;border:1px solid var(--border);background:rgba(255,255,255,.025);border-radius:12px;padding:12px}
+.comment-feed.show{display:block}
+.comment-feed-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px;font-size:11px;color:var(--text3);font-weight:900}
+.comment-feed-list{display:grid;gap:7px}
+.comment-feed-item{border:1px solid var(--border);background:rgba(255,255,255,.03);border-radius:10px;padding:9px 11px;cursor:pointer}
+.comment-feed-item:hover{border-color:var(--accent);background:rgba(129,140,248,.08)}
+.comment-feed-title{font-size:12px;color:var(--text);font-weight:900;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.comment-feed-meta{font-size:10px;color:var(--text3);font-weight:800;margin-bottom:4px}
+.comment-feed-text{font-size:11.5px;color:var(--text2);line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .btn-group{display:flex;flex-direction:column;gap:6px}
 .btn{border:none;border-radius:10px;padding:10px 16px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px;width:100%;letter-spacing:.2px;transition:all .18s}
 .btn:hover{transform:translateY(-1px);opacity:.92}
@@ -257,6 +280,10 @@ main{flex:1;overflow-y:auto;display:flex;flex-direction:column}
 .storage-item{border:1px solid var(--border);border-radius:10px;padding:9px;background:rgba(255,255,255,.03);min-height:88px}.storage-item-title{font-weight:800;color:var(--text);margin-bottom:4px}
 .storage-item small{display:block;font-size:10px;color:var(--text3);margin-top:4px;line-height:1.35}
 .storage-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.storage-actions .btn{width:auto;padding:9px 14px}.storage-alert{border:1px solid rgba(251,191,36,.45);background:rgba(251,191,36,.1);border-radius:10px;padding:9px 10px;margin-bottom:10px;color:#fde68a;font-size:11px;line-height:1.6}.storage-alert.danger{border-color:rgba(248,113,113,.55);background:rgba(248,113,113,.11);color:#fecaca}.storage-toolbar-note{font-size:10px;color:var(--text3);line-height:1.5;margin-top:8px}
+.admin-action-status{display:none;border:1px solid rgba(45,230,184,.35);background:rgba(45,230,184,.09);color:var(--success);border-radius:12px;padding:10px 12px;margin:0 0 14px;font-size:12px;font-weight:800;line-height:1.5}
+.admin-action-status.show{display:block}
+.admin-action-status.err{border-color:rgba(248,113,113,.45);background:rgba(248,113,113,.10);color:var(--danger)}
+.admin-action-status.info{border-color:rgba(129,140,248,.35);background:rgba(129,140,248,.10);color:var(--accent3)}
 @media(max-width:1200px){.storage-summary-top{grid-template-columns:repeat(2,minmax(120px,1fr))}}
 .admin-list-item{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--panel);border:1px solid var(--border);border-radius:10px;margin-bottom:8px}
 .admin-add-row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
@@ -269,14 +296,16 @@ main{flex:1;overflow-y:auto;display:flex;flex-direction:column}
 .admin-textarea:focus{border-color:var(--accent)}
 .admin-row{display:flex;gap:12px;align-items:center;margin-bottom:10px}
 .admin-row label{font-size:11px;color:var(--text3);min-width:140px;font-weight:700}
-.link-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
-.link-card{background:#222538;border:1px solid var(--border2);border-radius:12px;padding:14px 16px;cursor:pointer;position:relative;transition:all .18s}
-.link-card:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:0 8px 24px rgba(99,102,241,.2)}
-.link-cat{display:inline-block;font-size:9px;padding:2px 8px;border-radius:12px;background:rgba(99,102,241,.15);color:var(--accent3);margin-bottom:8px;font-weight:700}
-.link-title{font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px}
-.link-desc{font-size:11px;color:var(--text3);line-height:1.5;margin-bottom:6px}
-.link-url{font-size:10px;color:var(--text3);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.link-meta{font-size:10px;color:var(--text3);margin-top:8px;display:flex;justify-content:space-between}
+.link-grid{display:flex;flex-direction:column;gap:0;border:1px solid var(--border2);border-radius:12px}
+.link-card{background:#222538;border:none;border-bottom:1px solid var(--border2);border-radius:0;padding:8px 14px;cursor:pointer;position:relative;transition:background .15s;display:flex;align-items:center;gap:10px;min-height:42px;overflow:hidden}
+.link-card:first-child{border-radius:12px 12px 0 0}.link-card:last-child{border-bottom:none;border-radius:0 0 12px 12px}
+.link-card:hover{background:#2a2e4a;transform:none;box-shadow:none}
+.link-cat{display:inline-block;font-size:9px;padding:2px 8px;border-radius:12px;background:rgba(99,102,241,.15);color:var(--accent3);font-weight:700;flex-shrink:0;min-width:64px;text-align:center}
+.link-info{flex:1;min-width:0;overflow:hidden;display:flex;flex-direction:column;gap:2px}
+.link-title{font-size:13px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.link-meta{font-size:10px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.link-desc{font-size:11px;color:var(--text3);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.link-url{font-size:10px;color:var(--text3);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1.2;min-width:0}
 .link-del{position:absolute;top:10px;right:10px;background:none;border:none;color:var(--danger);font-size:14px;cursor:pointer;opacity:0}
 .link-card:hover .link-del{opacity:1}
 .link-card:hover .link-actions{opacity:1 !important}
@@ -487,7 +516,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.01;cursor:pointer
   .top-status-card,.top-pin,.top-refresh,.top-logout{flex:0 0 auto;height:32px;min-height:32px;border-radius:999px;padding:0 9px;white-space:nowrap}
   .top-status-card{gap:6px}.top-status-card .label{display:none}.top-status-card .value{font-size:10px}.top-status-card .dot{width:7px;height:7px}.top-pin,.top-logout{font-size:10px}.top-refresh{width:32px;padding:0}
   .sec-title{font-size:15px;margin:6px 0 10px}.alert{padding:10px 12px;font-size:11px;line-height:1.55}
-  .chart-grid,.two-col,.storage-summary-top,.storage-grid,.link-grid{grid-template-columns:1fr!important;gap:10px!important}
+  .chart-grid,.two-col,.storage-summary-top,.storage-grid{grid-template-columns:1fr!important;gap:10px!important}
   .filter-row{display:grid!important;grid-template-columns:1fr!important;gap:6px!important;align-items:stretch!important}
   .filter-row input,.filter-row select,.filter-row button,.page-size-select{width:100%!important;min-width:0!important;max-width:100%!important;height:36px;font-size:12px;margin:0!important}
   .private-editor .filter-row{display:grid!important;grid-template-columns:1fr 1fr!important}
@@ -564,7 +593,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.01;cursor:pointer
   .btn-ghost,.filter-reset{background:#fff!important;border:1px solid #dbe3ef!important;color:#334155!important;box-shadow:none!important}
   .btn{box-shadow:none!important}
   .btn:hover{transform:none!important}
-  .two-col,.chart-grid,.link-grid,.storage-summary-top,.storage-grid,.vt-grid{grid-template-columns:1fr!important}
+  .two-col,.chart-grid,.storage-summary-top,.storage-grid,.vt-grid{grid-template-columns:1fr!important}
   .rpanel{position:static!important;max-height:none!important;background:#fff!important;color:#111827!important;border-color:#e3e8f2!important;box-shadow:0 2px 12px rgba(15,23,42,.04)!important}
   .rp-desc,.rp-comment-item,.rp-meta,.rp-row{background:#f8fafc!important;border-color:#e3e8f2!important;color:#334155!important}
   .rp-row span:last-child{color:#0f172a!important}
@@ -772,7 +801,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.01;cursor:pointer
   .page .filter-row .page-size-select{width:100%;min-width:0;max-width:100%;height:36px;font-size:12px;margin:0}
 
   /* 그리드 단일 컬럼 */
-  .page .two-col,.page .chart-grid,.page .link-grid,
+  .page .two-col,.page .chart-grid,
   .page .storage-summary-top,.page .storage-grid,.page .vt-grid{
     grid-template-columns:1fr
   }
@@ -834,7 +863,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.01;cursor:pointer
   .filter-row input,.filter-row select,.filter-row button,.page-size-select,.admin-input,.admin-textarea,.log-textarea,.private-editor input,.private-editor textarea{width:100%!important;min-width:0!important;max-width:100%!important;height:38px!important;margin:0!important;background:#1a2034!important;border:1px solid rgba(129,140,248,.26)!important;color:var(--text)!important;border-radius:12px!important}
   .admin-textarea,.log-textarea,.private-editor textarea{height:auto!important;min-height:130px!important}
   .btn-ghost,.filter-reset{background:rgba(255,255,255,.07)!important;border:1px solid rgba(129,140,248,.24)!important;color:var(--text2)!important;box-shadow:none!important}.btn{box-shadow:none!important}.btn:hover{transform:none!important}
-  .two-col,.chart-grid,.link-grid,.storage-summary-top,.storage-grid,.vt-grid,.ops-focus-grid{grid-template-columns:1fr!important;gap:10px!important}
+  .two-col,.chart-grid,.storage-summary-top,.storage-grid,.vt-grid,.ops-focus-grid{grid-template-columns:1fr!important;gap:10px!important}
   .rp-desc,.rp-comment-item,.rp-meta,.rp-row{background:rgba(255,255,255,.035)!important;border-color:rgba(129,140,248,.18)!important;color:var(--text2)!important}.rp-row span:last-child{color:var(--text)!important}
   .admin-section{background:linear-gradient(145deg,rgba(34,40,64,.98),rgba(25,31,51,.98))!important;border:1px solid rgba(129,140,248,.22)!important;border-radius:16px!important;box-shadow:0 10px 24px rgba(0,0,0,.22)!important;overflow:hidden!important}
   .admin-section>summary{display:grid!important;grid-template-columns:minmax(0,1fr) auto!important;align-items:center!important;gap:5px 8px!important;min-height:58px!important;padding:12px 13px!important;color:var(--text)!important}.admin-section>summary span{grid-column:1/2!important;grid-row:1!important;font-size:13px!important}.admin-section>summary small{grid-column:1/-1!important;grid-row:2!important;color:var(--text3)!important;font-size:10px!important;line-height:1.35!important}.admin-section>summary:after{grid-column:2!important;grid-row:1!important;background:rgba(99,102,241,.16)!important;border-color:rgba(129,140,248,.32)!important;color:var(--accent3)!important}.admin-section .admin-card{margin:10px!important}
@@ -907,6 +936,33 @@ html[data-theme="light"] .rp-desc,html[data-theme="light"] .rp-comment-item,html
 html[data-theme="light"] .rp-row span:last-child{color:#111827}
 html[data-theme="light"] .audit-table th,html[data-theme="light"] .eos-table th{background:#eef3fb;color:#475569}
 html[data-theme="light"] .audit-table td,html[data-theme="light"] .eos-table td{color:#334155;border-bottom-color:#d8e2f0}
+html[data-theme="light"] .mini-card,html[data-theme="light"] .ops-focus-card,html[data-theme="light"] .rank-row,html[data-theme="light"] .vt-cell,html[data-theme="light"] .vt-hist-row,html[data-theme="light"] .admin-list-item{background:#ffffff;border-color:#d8e2f0;color:#111827;box-shadow:0 6px 18px rgba(30,41,59,.06)}
+html[data-theme="light"] .issue-card{background:linear-gradient(145deg,#ffffff,#f7faff);border-color:#d8e2f0;color:#111827;box-shadow:0 7px 20px rgba(30,41,59,.06)}
+html[data-theme="light"] .issue-card:hover,html[data-theme="light"] .issue-card.sel,html[data-theme="light"] .irow:hover,html[data-theme="light"] .case-card:hover{background:#f6f9fe!important;border-color:#b9c8dc!important}
+html[data-theme="light"] .issue-main .key,html[data-theme="light"] .issue-main .title,html[data-theme="light"] .ops-focus-card h4,html[data-theme="light"] .ops-focus-card .big,html[data-theme="light"] .vt-history-hash,html[data-theme="light"] .customer-work-row .k{color:#111827!important}
+html[data-theme="light"] .issue-sub,html[data-theme="light"] .ops-focus-card .small,html[data-theme="light"] .customer-work-row .t,html[data-theme="light"] .customer-work-row .m{color:#64748b!important}
+html[data-theme="light"] .dash-list-row{border-bottom-color:#d8e2f0}
+html[data-theme="light"] .dash-list-row:hover .title{color:#1d4ed8!important}
+html[data-theme="light"] .mini-filter-note .tag,html[data-theme="light"] .case-chip.done,html[data-theme="light"] .case-chip.open{background:#eef2ff!important;border-color:#c7d2fe!important;color:#3730a3!important}
+html[data-theme="light"] [onclick^="selectCustomer"]{background:linear-gradient(145deg,#ffffff,#f6f9fe)!important;border-color:#d8e2f0!important;color:#111827!important;box-shadow:0 7px 20px rgba(30,41,59,.06)}
+html[data-theme="light"] [onclick^="selectCustomer"]:hover{border-color:#b9c8dc!important;background:#f6f9fe!important}
+html[data-theme="light"] [onclick^="selectCustomer"] [style*="color:#f0f4ff"],html[data-theme="light"] #cust-right [style*="color:#f0f4ff"],html[data-theme="light"] #cust-right [style*="color:#c5cee8"],html[data-theme="light"] .knowledge-card [style*="color:#f0f4ff"],html[data-theme="light"] [style*="color:#f8faff"],html[data-theme="light"] [style*="color:#eaf0ff"],html[data-theme="light"] [style*="color:#cfe1ff"]{color:#111827!important}
+html[data-theme="light"] [style*="color:#c4ceff"],html[data-theme="light"] [style*="color:#dfe6ff"],html[data-theme="light"] [style*="color:#a5b4fc"]{color:#4338ca!important}
+html[data-theme="light"] [style*="background:rgba(196,206,255,.15)"]{background:#eef2ff!important;border:1px solid #c7d2fe!important}
+html[data-theme="light"] [style*="background:rgba(255,255,255,.02)"],html[data-theme="light"] [style*="background:rgba(255,255,255,.03)"],html[data-theme="light"] [style*="background:rgba(255,255,255,.04)"],html[data-theme="light"] [style*="background:rgba(255,255,255,.035)"]{background:#f5f8fd!important;border-color:#d8e2f0!important}
+html[data-theme="light"] [style*="color:#fde68a"]{color:#92400e!important}
+html[data-theme="light"] [style*="color:#fca5a5"]{color:#b91c1c!important}
+html[data-theme="light"] .item-comment{background:#f5f8fd;border-color:#d8e2f0;color:#334155}
+html[data-theme="light"] .item-comment-body{color:#334155}
+html[data-theme="light"] .item-comment-form textarea{background:#ffffff;border-color:#cbd7e8;color:#111827}
+html[data-theme="light"] .comment-feed{background:#ffffff;border-color:#d8e2f0;box-shadow:0 6px 18px rgba(30,41,59,.06)}
+html[data-theme="light"] .comment-feed-item{background:#f8fafc;border-color:#d8e2f0}
+html[data-theme="light"] .comment-feed-title{color:#111827}
+html[data-theme="light"] .comment-feed-meta,html[data-theme="light"] .comment-feed-head{color:#64748b}
+html[data-theme="light"] .comment-feed-text{color:#334155}
+html[data-theme="light"] .admin-action-status{background:#ecfdf5;border-color:#a7f3d0;color:#047857}
+html[data-theme="light"] .admin-action-status.err{background:#fef2f2;border-color:#fecaca;color:#b91c1c}
+html[data-theme="light"] .admin-action-status.info{background:#eef2ff;border-color:#c7d2fe;color:#3730a3}
 @media(max-width:700px){
   .top-theme{width:100%!important;min-width:0!important;flex:initial!important;height:32px!important;min-height:32px!important;border-radius:999px!important;padding:0 8px!important;font-size:10px!important;overflow:hidden!important;text-overflow:ellipsis!important;justify-content:center!important}
   .top-logout{grid-column:span 1!important}
@@ -936,6 +992,194 @@ html[data-theme="light"] .audit-table td,html[data-theme="light"] .eos-table td{
   html[data-theme="light"] .mobile-more-item.active{color:#3730a3!important;background:#eef2ff!important;border-color:#c7d2fe!important}
   html[data-theme="light"] .content,html[data-theme="light"] .panel,html[data-theme="light"] .admin-card,html[data-theme="light"] .kpi,html[data-theme="light"] .chart-card,html[data-theme="light"] .case-card,html[data-theme="light"] .issue-card,html[data-theme="light"] .irow,html[data-theme="light"] .link-card,html[data-theme="light"] .knowledge-card,html[data-theme="light"] .vt-result,html[data-theme="light"] .file-drop,html[data-theme="light"] .storage-summary,html[data-theme="light"] .storage-item,html[data-theme="light"] .private-editor,html[data-theme="light"] .rpanel{background:linear-gradient(145deg,rgba(255,255,255,.98),rgba(246,249,254,.98))!important;border-color:#d8e2f0!important;color:#111827!important;box-shadow:0 8px 22px rgba(30,41,59,.08)!important}
 }
+/* v1.5.11 final light-theme contrast guard */
+html[data-theme="light"] .sb-name,
+html[data-theme="light"] .topbar-left h2,
+html[data-theme="light"] .kpi-num,
+html[data-theme="light"] .kpi-val,
+html[data-theme="light"] .dash-list-row,
+html[data-theme="light"] .dash-list-row *,
+html[data-theme="light"] .issue-card,
+html[data-theme="light"] .issue-card *,
+html[data-theme="light"] .irow,
+html[data-theme="light"] .irow *,
+html[data-theme="light"] .case-card,
+html[data-theme="light"] .case-card *,
+html[data-theme="light"] .customer-card,
+html[data-theme="light"] .customer-card *,
+html[data-theme="light"] .link-card,
+html[data-theme="light"] .knowledge-card,
+html[data-theme="light"] .link-title,
+html[data-theme="light"] .knowledge-card h3,
+html[data-theme="light"] .admin-card h3{color:#111827!important}
+html[data-theme="light"] .sb-sub,
+html[data-theme="light"] .kpi-label,
+html[data-theme="light"] .kpi-sub,
+html[data-theme="light"] .imeta,
+html[data-theme="light"] .rank-stat,
+html[data-theme="light"] .link-desc,
+html[data-theme="light"] .link-url,
+html[data-theme="light"] .item-comment-meta,
+html[data-theme="light"] .sec-title,
+html[data-theme="light"] .chart-title{color:#475569!important}
+html[data-theme="light"] .tag,
+html[data-theme="light"] .badge,
+html[data-theme="light"] .label-chip,
+html[data-theme="light"] .case-chip{color:inherit}
+/* 업무링크 리스트뷰 라이트모드 */
+html[data-theme="light"] .link-grid{border-color:#e3e8f2!important;background:#fff}
+html[data-theme="light"] .link-card{background:#fff!important;border-bottom:1px solid #e3e8f2!important;box-shadow:none!important}
+html[data-theme="light"] .link-card:hover{background:#f8fafc!important}
+</style>
+
+<style id="light-fix">
+/* ══════════════════════════════════════════════════
+   LIGHT MODE COMPREHENSIVE FIX — v1.5.11-patch
+   하드코딩된 다크 색상 전체 라이트 오버라이드
+   ══════════════════════════════════════════════════ */
+
+/* ── 사이드바 AI 사용량 / 헬스카드 ── */
+html[data-theme="light"] .usage-card .u-title,
+html[data-theme="light"] .health-card .h-title { color:#1e40af !important; }
+
+html[data-theme="light"] .usage-card .u-val,
+html[data-theme="light"] .health-card .u-val { color:#111827 !important; }
+
+html[data-theme="light"] .health-card .h-row { color:#475569 !important; }
+
+html[data-theme="light"] .health-card .sync-mini {
+  background:#e0f2fe !important;
+  border-color:#bae6fd !important;
+  color:#0369a1 !important;
+}
+
+/* ── AI 사용량 v155 카드 ── */
+html[data-theme="light"] .ai-usage-v155 .u-title { color:#0891b2 !important; }
+
+html[data-theme="light"] .ai-usage-v155 .pill-btn {
+  color:#0369a1 !important;
+  background:#e0f2fe !important;
+  border-color:#bae6fd !important;
+}
+
+html[data-theme="light"] .ai-usage-v155 .usage-total b { color:#111827 !important; }
+
+html[data-theme="light"] .usage-card.ai-usage-v155 {
+  border-color:rgba(14,165,233,.3) !important;
+  background:linear-gradient(180deg,rgba(224,242,254,.7),rgba(240,249,255,.7)) !important;
+}
+
+html[data-theme="light"] .ai-usage-v155 .usage-meter {
+  background:rgba(14,165,233,.18) !important;
+}
+
+html[data-theme="light"] .ai-usage-v155 .u-mini {
+  border-color:#bae6fd !important;
+  background:rgba(224,242,254,.6) !important;
+}
+
+html[data-theme="light"] .ai-usage-v155 .u-mini b { color:#0c4a6e !important; }
+
+/* ── 대시보드 KPI 카드 ── */
+html[data-theme="light"] .kpi .num { color:#111827 !important; }
+html[data-theme="light"] .kpi .label { color:#475569 !important; }
+html[data-theme="light"] .kpi .sub { color:#64748b !important; }
+
+/* ── 대시보드 섹션 타이틀 ── */
+html[data-theme="light"] .dash-section .sec-title { color:#3730a3 !important; }
+html[data-theme="light"] .dash-section .sec-title:after { background:#c7d2fe !important; }
+
+/* ── 대시보드 리스트 행 ── */
+html[data-theme="light"] .dash-list-row {
+  border-bottom-color:#e2e8f0 !important;
+}
+html[data-theme="light"] .dash-list-row:hover .title { color:#1d4ed8 !important; }
+
+/* ── EOS 배너 ── */
+html[data-theme="light"] .eos-banner-title { color:#b91c1c !important; }
+
+/* ── 운영 포커스 인라인 색상 ── */
+html[data-theme="light"] [style*="color:#e8edff"] { color:#1e293b !important; }
+html[data-theme="light"] [style*="color:#f87171"] { color:#dc2626 !important; }
+html[data-theme="light"] [style*="color:#c5cee8"]:not([id="cust-right"] *) { color:#334155 !important; }
+
+/* ── 검색박스 ── */
+html[data-theme="light"] .search-box input { color:#334155 !important; }
+html[data-theme="light"] .search-box { background:rgba(255,255,255,.78) !important; border-color:#cbd7e8 !important; }
+
+/* ── date input ── */
+html[data-theme="light"] input[type="date"] { color-scheme:light; color:#111827 !important; }
+html[data-theme="light"] .date-open-btn {
+  border-color:rgba(14,165,233,.5) !important;
+  background:#e0f2fe !important;
+  color:#0369a1 !important;
+  box-shadow:0 0 8px rgba(14,165,233,.15) !important;
+}
+
+/* ── VT 해시 / 히스토리 ── */
+html[data-theme="light"] .vt-history-hash { color:#1e40af !important; }
+
+/* ── 고객사 패널 EOS 섹션 (JS 렌더링) ── */
+html[data-theme="light"] #cust-right [style*="color:#c5cee8"],
+html[data-theme="light"] #cust-right [style*="color:#f0f4ff"] { color:#111827 !important; }
+html[data-theme="light"] #cust-right [style*="background:rgba(255,255,255,.04)"] {
+  background:#f1f5f9 !important;
+  border-color:#e2e8f0 !important;
+}
+
+/* ── 운영 포커스 sec() 헬퍼 인라인 배경 ── */
+html[data-theme="light"] [style*="background:rgba(255,255,255,.03)"] {
+  background:#f8fafc !important;
+  border-color:#e2e8f0 !important;
+}
+
+/* ── mini-filter-note 태그 ── */
+html[data-theme="light"] .mini-filter-note .tag {
+  color:#3730a3 !important;
+  background:#eef2ff !important;
+  border-color:#c7d2fe !important;
+}
+
+/* ── case-chip 기본 상태 (open/done은 기존 처리) ── */
+html[data-theme="light"] .case-chip:not(.done):not(.open) {
+  color:#475569 !important;
+  background:#f1f5f9 !important;
+  border-color:#cbd5e1 !important;
+}
+
+/* ── pager 버튼 ── */
+html[data-theme="light"] .pager button {
+  background:#ffffff !important;
+  border-color:#cbd7e8 !important;
+  color:#334155 !important;
+}
+html[data-theme="light"] .pager button:hover { background:#eef2ff !important; color:#3730a3 !important; }
+
+/* ── sync-banner ── */
+html[data-theme="light"] .sync-banner {
+  background:linear-gradient(135deg,rgba(238,242,255,.9),rgba(224,242,254,.9)) !important;
+  border-color:rgba(79,70,229,.22) !important;
+  color:#334155 !important;
+}
+
+/* ── AI 모달 footer ── */
+html[data-theme="light"] .ai-modal-foot { color:#64748b !important; border-top-color:#e2e8f0 !important; }
+html[data-theme="light"] .ai-modal-foot span { color:#94a3b8 !important; }
+
+/* ── 로그 분석 textarea ── */
+html[data-theme="light"] .log-textarea {
+  background:#ffffff !important;
+  border-color:#cbd7e8 !important;
+  color:#111827 !important;
+}
+
+/* ── customer-work-row ── */
+html[data-theme="light"] .customer-work-row .k { color:#1e40af !important; }
+
+/* ── 가독성 보완: bar-lbl, rank-pos ── */
+html[data-theme="light"] .bar-lbl { color:#475569 !important; }
+html[data-theme="light"] .rank-pos:not(.top1):not(.top2):not(.top3) { color:#94a3b8 !important; }
+html[data-theme="light"] .rank-pos.top2 { color:#64748b !important; }
 </style>
 
 </head>
@@ -1008,7 +1252,7 @@ html[data-theme="light"] .audit-table td,html[data-theme="light"] .eos-table td{
     <div class="sb-top">
       <div class="sb-brand">
         <div class="sb-icon"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></div>
-        <div><div class="sb-name">ENGR AI</div><div class="sb-sub">Security Hub <span style="background:rgba(99,102,241,.25);color:var(--accent3);font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700;letter-spacing:.5px">v1.5.9</span></div></div>
+        <div><div class="sb-name">ENGR AI</div><div class="sb-sub">Security Hub <span style="background:rgba(99,102,241,.25);color:var(--accent3);font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700;letter-spacing:.5px">v1.6.0</span></div></div>
       </div>
       <div class="sb-section">메뉴</div>
       <div class="sb-nav">
@@ -1025,8 +1269,7 @@ html[data-theme="light"] .audit-table td,html[data-theme="light"] .eos-table td{
         <button class="sb-btn" id="nav-knowledge" onclick="showPage('knowledge',this)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>팀 노하우
         </button>
-        <button class="sb-btn" id="nav-audit" onclick="showPage('audit',this)" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="2"/></svg>감사 로그</button>
-        <button class="sb-btn" id="nav-settings" onclick="showPage('settings',this)" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>관리자 설정</button>
+        <button class="sb-btn" id="nav-audit" onclick="showPage('audit',this)" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="2"/></svg>감사 로그</button>        <button class="sb-btn" id="nav-settings" onclick="showPage('settings',this)" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>관리자 설정</button>
       </div>
     </div>
     <div class="sb-divider"></div>
@@ -1255,6 +1498,7 @@ html[data-theme="light"] .audit-table td,html[data-theme="light"] .eos-table td{
         <button class="filter-reset" onclick="resetLinkFilters()">✕ 초기화</button>
         <span class="filter-count" id="links-count">0건</span>
       </div>
+      <div id="links-comment-feed" class="comment-feed"></div>
       <div id="links-grid" class="link-grid"></div>
       <div id="links-pager" class="pager"></div>
     </div>
@@ -1287,6 +1531,7 @@ html[data-theme="light"] .audit-table td,html[data-theme="light"] .eos-table td{
         <button class="filter-reset" onclick="resetKnowledgeFilters()">✕ 초기화</button>
         <span class="filter-count" id="know-count">0건</span>
       </div>
+      <div id="knowledge-comment-feed" class="comment-feed"></div>
       <div id="knowledge-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px"></div>
       <div id="know-pager" class="pager"></div>
     </div>
@@ -1317,6 +1562,7 @@ html[data-theme="light"] .audit-table td,html[data-theme="light"] .eos-table td{
 
     <div class="page" id="page-settings">
       <div class="sec-title">⚙ 관리자 설정</div>
+      <div id="admin-action-status" class="admin-action-status" role="status" aria-live="polite"></div>
 
       <details class="admin-section" open>
         <summary><span>시스템 설정</span><small>조회 기간 · 세션 · EOS · AI 지침</small></summary>
@@ -1443,6 +1689,19 @@ const MAX_FILE_SIZE=5*1024*1024;
 let ISSUES=[],SEL=null,CASE_SEL=null,PAGE=1;
 let CURRENT_USER='',CURRENT_DISPLAY='',IS_ADMIN=false,IS_SUPER=false,USER_ROLE='user';
 let SESSION_MIN=120, SESSION_DEADLINE=0, SESSION_TIMER=null;
+
+// ── 전역 에러 핸들러 ──────────────────────────────
+window.addEventListener('unhandledrejection',e=>{
+  const msg=e?.reason?.message||String(e?.reason||'알 수 없는 오류');
+  if(msg.includes('세션')||msg.includes('401')||msg.includes('403'))return;
+  console.error('[HUB] Unhandled rejection:',e.reason);
+  const t=document.getElementById('toast');
+  if(t&&t.style.display!=='block'){t.textContent='오류가 발생했습니다: '+msg.slice(0,60);t.className='err';t.style.display='block';setTimeout(()=>t.style.display='none',3500);}
+});
+window.onerror=(msg,src,line,col,err)=>{
+  console.error('[HUB] Global error:',msg,src,line,err);
+  return false;
+};
 let AI_USAGE_LOADING=false, AI_USAGE_LAST=null;
 let VT_HISTORY=JSON.parse(localStorage.getItem('vt_history')||'[]');
 let LINKS=[],EOS_ITEMS=[],TEAM_NAMES=[];
@@ -1568,7 +1827,7 @@ function enterApp(){
   document.getElementById('cfg').style.display='none';
   document.getElementById('app').style.display='flex';
   document.getElementById('ai-dot').innerHTML='<span class="dot dot-green"></span><span style="color:var(--success)">준비됨</span>';
-  if(IS_ADMIN||IS_SUPER)document.getElementById('nav-audit').style.display='flex';
+  if(IS_ADMIN||IS_SUPER){document.getElementById('nav-audit').style.display='flex';}
   if(IS_SUPER)document.getElementById('nav-settings').style.display='flex';
   // 링크 등록은 전체 팀원 가능
   startSessionTimer();
@@ -1577,11 +1836,16 @@ function enterApp(){
 }
 function startSessionTimer(){
   if(SESSION_TIMER)clearInterval(SESSION_TIMER);
+  let _warned5=false,_warned1=false;
   SESSION_TIMER=setInterval(()=>{
     const remain=SESSION_DEADLINE-Date.now();
-    if(remain<=0){clearInterval(SESSION_TIMER);toast('세션 만료',true);setTimeout(forceLogout,1500);return;}
+    if(remain<=0){clearInterval(SESSION_TIMER);toast('세션이 만료되었습니다. 다시 로그인해주세요.',true);setTimeout(forceLogout,1800);return;}
     const m=Math.floor(remain/60000),s=Math.floor((remain%60000)/1000);
     document.getElementById('session-timer').textContent=`세션 ${m}:${String(s).padStart(2,'0')}`;
+    if(!_warned5&&remain<=300000&&remain>298000){_warned5=true;toast('⏰ 세션이 5분 후 만료됩니다. 화면을 클릭하면 연장됩니다.');}
+    if(!_warned1&&remain<=60000&&remain>58000){_warned1=true;toast('⚠️ 세션이 1분 후 만료됩니다!',true);}
+    if(remain>310000){_warned5=false;}
+    if(remain>70000){_warned1=false;}
   },1000);
 }
 function extendSession(){SESSION_DEADLINE=Date.now()+SESSION_MIN*60000;localStorage.setItem('engr_session_deadline',SESSION_DEADLINE);}
@@ -1645,7 +1909,8 @@ async function loadAIUsage(options={}){
   if(reason==='login')applyCachedAIUsage();
   setAIUsageLoading(reason);
   try{
-    const r=await fetch(`${WORKERS}/kv/usage`,{headers:authHeaders()});
+    const usageEndpoint=(IS_ADMIN||IS_SUPER)?'/kv/usage':'/kv/usage/me';
+    const r=await fetch(`${WORKERS}${usageEndpoint}`,{headers:authHeaders()});
     if(!r.ok)throw new Error('usage endpoint unavailable');
     const usage=await r.json();
     applyAIUsage(usage);
@@ -1687,7 +1952,7 @@ function showPage(id,btn){
   if(id==='cases')renderCases();
   if(id==='customers')renderCustomers();
   if(id==='eos')renderEosList();
-  if(id==='links')renderLinks();
+  if(id==='links'){loadLinks().then(renderLinks);}
   if(id==='knowledge'){loadKnowledge().then(renderKnowledge);}
   if(id==='audit')loadAudit();
   if(id==='settings')loadSettings();
@@ -1957,7 +2222,8 @@ function renderOpsFocus(){
     </div>`;
 }
 
-function renderDash(){
+// renderDash — v1.5.5 최종 정의는 파일 하단에 있음 (중복 제거됨)
+function renderDash_legacy_v1(){
   const total=ISSUES.length;
   const done=ISSUES.filter(i=>i.status==='완료').length;
   const prog=ISSUES.filter(i=>['진행 중','진행중','In Progress'].includes(i.status)).length;
@@ -2078,7 +2344,7 @@ function filteredIssues(){
     return true;
   });
 }
-function renderIssues(){
+function renderIssues_legacy_v1(){
   renderFilterTags();
   const fi=filteredIssues();
   const pgSize=parseInt(document.getElementById('f-pg')?.value||'20');
@@ -2398,7 +2664,7 @@ document.addEventListener('keydown',e=>{
 function getCases(){
   return ISSUES.filter(i=>i.caseNums&&i.caseNums.length>0).flatMap(i=>i.caseNums.map(cn=>({...i,caseNum:cn})));
 }
-function renderCases(){
+function renderCases_legacy_v1(){
   const q=(document.getElementById('case-q')||{}).value?.toLowerCase()||'';
   const cStat=document.getElementById('case-stat')?.value||'';
   const cAss=document.getElementById('case-ass')?.value||'';
@@ -2702,12 +2968,40 @@ async function deleteEos(id){
 // ── LINKS ─────────────────────────────────────────
 async function loadLinks(){
   try{
-    const r=await fetch(`${WORKERS}/links`);
+    const r=await fetch(`${WORKERS}/links`,{headers:authHeaders()});
     const d=await r.json();
     LINKS=d.links||[];
   }catch{}
 }
+function renderCommentFeed(containerId, kind, items){
+  const el=document.getElementById(containerId);
+  if(!el)return;
+  const rows=(items||[]).flatMap(item=>(item.comments||[]).map(c=>({
+    kind,
+    itemId:item.id,
+    itemTitle:item.title||'(제목 없음)',
+    itemMeta:kind==='links'?(item.category||item.cat||'업무 링크'):[item.product,item.category].filter(Boolean).join(' · '),
+    text:c.text||'',
+    createdBy:c.createdBy||'-',
+    createdAt:c.createdAt||item.updatedAt||item.createdAt||''
+  }))).sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0)).slice(0,5);
+  if(!rows.length){
+    el.classList.remove('show');
+    el.innerHTML='';
+    return;
+  }
+  const title=kind==='links'?'업무 링크 최근 댓글':'팀 노하우 최근 댓글';
+  const openFn=kind==='links'?'openLinkDetail':'openKnowledgeDetail';
+  el.classList.add('show');
+  el.innerHTML=`<div class="comment-feed-head"><span>💬 ${title}</span><span>최근 ${rows.length}건</span></div>
+    <div class="comment-feed-list">${rows.map(r=>`<div class="comment-feed-item" onclick="${openFn}(${jsAttr(r.itemId)})">
+      <div class="comment-feed-title">${escapeHtml(r.itemTitle)}</div>
+      <div class="comment-feed-meta">${escapeHtml(r.createdBy)} · ${fdt(r.createdAt)} · ${escapeHtml(r.itemMeta||'-')}</div>
+      <div class="comment-feed-text">${escapeHtml(r.text)}</div>
+    </div>`).join('')}</div>`;
+}
 function renderLinks(){
+  renderCommentFeed('links-comment-feed','links',LINKS);
   const catSel=document.getElementById('links-cat');
   if(catSel){
     const cur=catSel.value;
@@ -2718,15 +3012,80 @@ function renderLinks(){
   const cat=(document.getElementById('links-cat')||{}).value||'';
   const list=LINKS.filter(l=>{
     const itemCat=l.category||l.cat||'';
-    const txt=[l.title,l.desc,l.url,itemCat,l.createdBy].join(' ').toLowerCase();
+    const txt=[l.title,l.desc,l.url,itemCat,l.createdBy,(l.comments||[]).map(c=>c.text).join(' ')].join(' ').toLowerCase();
     return (!cat||itemCat===cat)&&(!q||txt.includes(q));
   });
   const pageLinks=sliceForPage(list,'links');
   const cnt=document.getElementById('links-count');if(cnt)cnt.textContent=pageCountText('links',list.length);
   const wrap=document.getElementById('links-grid');
-  if(!pageLinks.length){wrap.innerHTML=`<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text3);font-size:13px">등록된 링크가 없거나 조건에 맞는 링크가 없습니다</div>`;renderPager('links-pager','links',list.length,'renderLinks');return;}
-  wrap.innerHTML=pageLinks.map(l=>`<div class="link-card" onclick="window.open('${escapeHtml(normalizeExternalUrl(l.url))}','_blank')"><div style="position:absolute;top:8px;right:8px;display:flex;gap:4px;opacity:0;transition:opacity .15s" class="link-actions"><button onclick="event.stopPropagation();openLinkEditModal('${l.id}')" style="background:var(--card2);border:1px solid var(--border2);border-radius:6px;color:var(--text3);cursor:pointer;font-size:10px;padding:2px 8px;font-family:inherit">✎</button><button onclick="event.stopPropagation();deleteLink('${l.id}')" style="background:var(--card2);border:1px solid var(--border2);border-radius:6px;color:var(--danger);cursor:pointer;font-size:12px;padding:2px 7px;font-family:inherit">×</button></div><span class="link-cat">${escapeHtml(l.category||l.cat||'기타')}</span><div class="link-title">${escapeHtml(l.title||'')}</div>${l.desc?`<div class="link-desc">${escapeHtml(l.desc)}</div>`:''}<div class="link-url">${escapeHtml(l.url||'')}</div><div class="link-meta"><span>by ${escapeHtml(l.createdBy||'-')}</span><span>${l.createdAt?fd(l.createdAt):''}</span></div></div>`).join('');
+  if(!pageLinks.length){wrap.innerHTML=`<div style="text-align:center;padding:40px;color:var(--text3);font-size:13px">등록된 링크가 없거나 조건에 맞는 링크가 없습니다</div>`;renderPager('links-pager','links',list.length,'renderLinks');return;}
+  wrap.innerHTML=pageLinks.map(l=>{
+    const commentCount=(l.comments||[]).length;
+    const cat=escapeHtml(l.category||l.cat||'기타');
+    const title=escapeHtml(l.title||'');
+    const url=escapeHtml(l.url||'');
+    const meta=`by ${escapeHtml(l.createdBy||'-')}${l.createdAt?' · '+fd(l.createdAt):''}${commentCount?' · 댓글 '+commentCount:''}`;
+    return `<div class="link-card" onclick="window.open('${escapeHtml(normalizeExternalUrl(l.url))}','_blank')"><span class="link-cat">${cat}</span><div class="link-info"><div class="link-title">${title}</div><div class="link-meta">${meta}</div></div>${l.desc?`<div class="link-desc">${escapeHtml(l.desc)}</div>`:''}<div class="link-url">${url}</div><div class="link-actions" style="flex-shrink:0;display:flex;gap:4px;opacity:0;transition:opacity .15s"><button onclick="event.stopPropagation();openLinkDetail('${l.id}')" style="background:var(--card2);border:1px solid var(--border2);border-radius:6px;color:var(--text3);cursor:pointer;font-size:10px;padding:2px 8px;font-family:inherit">댓글 ${commentCount}</button><button onclick="event.stopPropagation();openLinkEditModal('${l.id}')" style="background:var(--card2);border:1px solid var(--border2);border-radius:6px;color:var(--text3);cursor:pointer;font-size:10px;padding:2px 8px;font-family:inherit">✎</button><button onclick="event.stopPropagation();deleteLink('${l.id}')" style="background:var(--card2);border:1px solid var(--border2);border-radius:6px;color:var(--danger);cursor:pointer;font-size:12px;padding:2px 7px;font-family:inherit">×</button></div></div>`;
+  }).join('');
   renderPager('links-pager','links',list.length,'renderLinks');
+}
+
+function itemCommentsHtml(kind,item){
+  const comments=item.comments||[];
+  const title=kind==='links'?'링크 의견':'노하우 의견';
+  const rows=comments.length?comments.map(c=>{
+    const canDelete=IS_ADMIN||c.createdBy===CURRENT_USER;
+    return `<div class="item-comment">
+      <div class="item-comment-meta"><span>${escapeHtml(c.createdBy||'-')} · ${fdt(c.createdAt)}</span>${canDelete?`<button class="item-comment-del" onclick="deleteItemComment('${kind}','${escapeHtml(item.id)}','${escapeHtml(c.id)}')">×</button>`:''}</div>
+      <div class="item-comment-body">${escapeHtml(c.text||'')}</div>
+    </div>`;
+  }).join(''):`<div style="font-size:12px;color:var(--text3);padding:10px 0">아직 댓글이 없습니다.</div>`;
+  return `<div class="item-comments">
+    <h4>${title} (${comments.length})</h4>
+    ${rows}
+    <div class="item-comment-form">
+      <textarea id="${kind}-comment-text-${escapeHtml(item.id)}" class="admin-textarea" placeholder="의견, 보완할 점, 참고 내용을 남겨주세요"></textarea>
+      <button class="btn btn-indigo" onclick="addItemComment('${kind}','${escapeHtml(item.id)}')" style="width:auto;padding:8px 16px">댓글</button>
+    </div>
+  </div>`;
+}
+function openLinkDetail(id){
+  const l=LINKS.find(x=>x.id===id);
+  if(!l){toast('링크를 찾을 수 없습니다',true);return;}
+  const href=normalizeExternalUrl(l.url||'');
+  openGenModal(l.title||'업무 링크 상세',`
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+      <span class="link-cat">${escapeHtml(l.category||l.cat||'기타')}</span>
+    </div>
+    ${l.desc?`<div style="font-size:13px;color:var(--text2);line-height:1.7;white-space:pre-wrap;margin-bottom:12px">${escapeHtml(l.desc)}</div>`:''}
+    <div class="link-url" style="margin-bottom:10px">${escapeHtml(l.url||'')}</div>
+    <div style="font-size:10px;color:var(--text3);margin-bottom:12px">${escapeHtml(l.createdBy||'-')} · ${l.updatedAt?'수정 '+fd(l.updatedAt):fd(l.createdAt)}</div>
+    ${itemCommentsHtml('links',l)}`,
+    `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none"><button class="btn btn-ghost" style="width:auto;padding:8px 18px">열기 →</button></a>
+     <button class="btn btn-indigo" onclick="openLinkEditModal('${id}')" style="width:auto;padding:8px 18px">수정</button>
+     <button class="btn btn-ghost" onclick="closeGenModal()" style="width:auto;padding:8px 18px">닫기</button>`);
+}
+async function addItemComment(kind,id){
+  const text=document.getElementById(`${kind}-comment-text-${id}`)?.value.trim()||'';
+  if(!text){toast('댓글 내용을 입력하세요',true);return;}
+  const base=kind==='links'?'links':'knowledge';
+  try{
+    const d=await hubApi(`/${base}/${encodeURIComponent(id)}/comments`,{method:'POST',body:JSON.stringify({text})});
+    toast(`댓글 등록 완료`);
+    if(base==='links'){await loadLinks();renderLinks();openLinkDetail(id);}
+    else{await loadKnowledge();renderKnowledge();openKnowledgeDetail(id);}
+    return d;
+  }catch(e){toast('댓글 등록 실패: '+e.message,true);}
+}
+async function deleteItemComment(kind,id,commentId){
+  if(!confirm('댓글을 삭제할까요?'))return;
+  const base=kind==='links'?'links':'knowledge';
+  try{
+    await hubApi(`/${base}/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`,{method:'DELETE'});
+    toast('댓글 삭제 완료');
+    if(base==='links'){await loadLinks();renderLinks();openLinkDetail(id);}
+    else{await loadKnowledge();renderKnowledge();openKnowledgeDetail(id);}
+  }catch(e){toast('댓글 삭제 실패: '+e.message,true);}
 }
 
 function openLinkModal(){
@@ -3092,6 +3451,12 @@ async function loadAudit(){
 }
 
 // ── SETTINGS ──────────────────────────────────────
+function setAdminActionStatus(message,type='ok'){
+  const el=document.getElementById('admin-action-status');
+  if(!el)return;
+  el.textContent=message;
+  el.className=`admin-action-status show ${type==='err'?'err':type==='info'?'info':''}`.trim();
+}
 async function loadSettings(){
   try{
     const r=await fetch(`${WORKERS}/admin/config`,{headers:authHeaders()});
@@ -3143,11 +3508,14 @@ function renderUserAccounts(users=[]){
   const wrap=document.getElementById('user-list-wrap');if(!wrap)return;
   wrap.innerHTML=users.map(u=>`<div class="admin-list-item">
     <div style="display:flex;align-items:center;gap:10px;min-width:0">
-      <span style="font-size:10px;padding:2px 9px;border-radius:20px;background:${u.role==='super'?'rgba(248,113,113,.15)':u.role==='admin'?'rgba(99,102,241,.15)':'rgba(45,230,184,.12)'};color:${u.role==='super'?'#f87171':u.role==='admin'?'var(--accent3)':'var(--accent2)'};font-weight:800">${u.role==='super'?'SUPER':u.role==='admin'?'ADMIN':'USER'}</span>
+      <span style="font-size:10px;padding:2px 9px;border-radius:20px;background:${u.active===false?'rgba(148,163,184,.14)':u.role==='super'?'rgba(248,113,113,.15)':u.role==='admin'?'rgba(99,102,241,.15)':'rgba(45,230,184,.12)'};color:${u.active===false?'var(--text3)':u.role==='super'?'#f87171':u.role==='admin'?'var(--accent3)':'var(--accent2)'};font-weight:800">${u.active===false?'비활성':u.role==='super'?'SUPER':u.role==='admin'?'ADMIN':'USER'}</span>
       <span style="font-weight:800;color:var(--text)">${escapeHtml(u.displayName||u.id)}</span>
       <span style="font-size:11px;color:var(--text3)">${escapeHtml(u.id)}</span>
     </div>
-    <button class="btn btn-ghost" onclick="fillUserForm('${escapeHtml(u.id)}','${escapeHtml(u.displayName||'')}','${escapeHtml(u.role||'user')}')" style="width:auto;padding:4px 12px;font-size:11px">수정</button>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="fillUserForm('${escapeHtml(u.id)}','${escapeHtml(u.displayName||'')}','${escapeHtml(u.role||'user')}')" style="width:auto;padding:4px 12px;font-size:11px">수정</button>
+      ${u.id!==SUPER_ADMIN&&u.active!==false?`<button class="btn btn-red" onclick="deleteUserAccount('${escapeHtml(u.id)}')" style="width:auto;padding:4px 12px;font-size:11px">로그인 차단</button>`:''}
+    </div>
   </div>`).join('')||'<div class="empty">등록된 사용자가 없습니다.</div>';
 }
 function fillUserForm(id,displayName,role){
@@ -3166,12 +3534,23 @@ async function saveUserAccount(){
   try{
     const r=await fetch(`${WORKERS}/admin/users`,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({id,displayName,role,initialPin})});
     const d=await r.json();
-    if(!d.ok){toast(d.message||'사용자 저장 실패',true);return;}
+    if(!d.ok){toast(d.message||'사용자 저장 실패',true);setAdminActionStatus(d.message||'사용자 저장 실패','err');return;}
     toast('사용자 저장 완료');
+    setAdminActionStatus(`${id} 사용자 저장 완료`);
     ['user-add-id','user-add-display','user-add-pin'].forEach(x=>document.getElementById(x).value='');
     document.getElementById('user-add-role').value='user';
     loadSettings();
-  }catch(e){toast('사용자 저장 오류: '+e.message,true);}
+  }catch(e){toast('사용자 저장 오류: '+e.message,true);setAdminActionStatus('사용자 저장 실패: '+e.message,'err');}
+}
+async function deleteUserAccount(id){
+  if(!id||id===SUPER_ADMIN)return;
+  if(!confirm(`${id} 계정의 로그인을 차단할까요?\n등록자가 만든 업무 데이터는 삭제하지 않습니다.`))return;
+  try{
+    const d=await hubApi(`/admin/users/${encodeURIComponent(id)}`,{method:'DELETE'});
+    toast(`${d.user||id} 로그인 차단 완료`);
+    setAdminActionStatus(`${d.user||id} 계정 로그인을 차단했습니다. 기존 등록 데이터는 유지됩니다.`);
+    await loadSettings();
+  }catch(e){toast('사용자 삭제 실패: '+e.message,true);setAdminActionStatus('사용자 로그인 차단 실패: '+e.message,'err');}
 }
 async function saveConfig(){
   const body={
@@ -3183,10 +3562,11 @@ async function saveConfig(){
   try{
     const r=await fetch(`${WORKERS}/admin/config`,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)});
     const d=await r.json();
-    if(!d.ok){toast(d.message||'저장 실패',true);return;}
+    if(!d.ok){toast(d.message||'저장 실패',true);setAdminActionStatus(d.message||'시스템 설정 저장 실패','err');return;}
     toast('저장 완료. 일부 설정은 새로고침 후 반영됩니다.');
+    setAdminActionStatus('시스템 설정 저장 완료. 일부 설정은 새로고침 후 반영됩니다.');
     loadEosWarnDays();
-  }catch(e){toast('오류: '+e.message,true);}
+  }catch(e){toast('오류: '+e.message,true);setAdminActionStatus('시스템 설정 저장 실패: '+e.message,'err');}
 }
 async function clearCache(){
   if(!confirm(`AI 응답 캐시(ai:*)를 삭제하시겠어요?\n캐시만 삭제되며 업무 링크/노하우/Jira 데이터는 삭제되지 않습니다.`))return;
@@ -3196,10 +3576,11 @@ async function clearCache(){
   try{
     const r=await fetch(`${WORKERS}/admin/cache/clear`,{method:'POST',headers:authHeaders()});
     const d=await r.json();
-    if(!d.ok){toast(d.message||'실패',true);return;}
+    if(!d.ok){toast(d.message||'실패',true);setAdminActionStatus(d.message||'AI 응답 캐시 정리 실패','err');return;}
     toast(`AI 캐시 ${d.cleared}개 삭제${d.truncated?' · 추가 캐시가 남아있을 수 있습니다. 다시 실행하세요.':''}`);
+    setAdminActionStatus(`AI 응답 캐시 정리 완료: ${d.cleared}개 삭제${d.truncated?' · 남은 캐시가 있을 수 있습니다.':''}`);
     await refreshStorageStats();
-  }catch(e){toast('오류: '+e.message,true);}
+  }catch(e){toast('오류: '+e.message,true);setAdminActionStatus('AI 응답 캐시 정리 실패: '+e.message,'err');}
   finally{if(btn){btn.disabled=false;btn.textContent=old||'🧹 AI 응답 캐시 초기화';}}
 }
 async function downloadHubBackup(){
@@ -3218,7 +3599,8 @@ async function downloadHubBackup(){
     document.body.appendChild(a);a.click();a.remove();
     setTimeout(()=>URL.revokeObjectURL(a.href),1000);
     toast('전체 HUB 데이터 백업 파일을 생성했습니다.');
-  }catch(e){toast('백업 오류: '+e.message,true);}
+    setAdminActionStatus('전체 HUB 데이터 백업 파일 생성 완료');
+  }catch(e){toast('백업 오류: '+e.message,true);setAdminActionStatus('백업 생성 실패: '+e.message,'err');}
   finally{if(btn){btn.disabled=false;btn.textContent=old||'⬇ 전체 HUB 데이터 백업';}}
 }
 async function cleanupOldAuditLogs(){
@@ -3230,7 +3612,7 @@ async function cleanupOldAuditLogs(){
     const dry=await fetch(`${WORKERS}/admin/storage/cleanup`,{method:'POST',headers,body:JSON.stringify({target:'audit-old',days:90,dryRun:true,max:500})});
     const dd=await dry.json();
     if(!dd.ok)throw new Error(dd.message||'정리 대상 확인 실패');
-    if(!dd.matched){toast('정리할 90일 초과 감사 로그가 없습니다.');return;}
+    if(!dd.matched){toast('정리할 90일 초과 감사 로그가 없습니다.');setAdminActionStatus('감사 로그 정리 대상 없음','info');return;}
     const msg=`90일 초과 감사 로그 인덱스/본문 ${dd.matched}개를 정리할 수 있습니다.
 이번 실행 최대 ${dd.scanned}개를 검사했습니다.
 
@@ -3241,8 +3623,9 @@ async function cleanupOldAuditLogs(){
     const d=await r.json();
     if(!d.ok)throw new Error(d.message||'정리 실패');
     toast(`감사 로그 정리 완료: ${d.deleted}개 삭제${d.truncated?' · 남은 대상이 있을 수 있습니다. 다시 실행하세요.':''}`);
+    setAdminActionStatus(`감사 로그 정리 완료: ${d.deleted}개 삭제${d.truncated?' · 남은 대상이 있을 수 있습니다.':''}`);
     await refreshStorageStats();
-  }catch(e){toast('정리 오류: '+e.message,true);}
+  }catch(e){toast('정리 오류: '+e.message,true);setAdminActionStatus('감사 로그 정리 실패: '+e.message,'err');}
   finally{if(btn){btn.disabled=false;btn.textContent=old||'🧹 감사 로그 90일 초과 정리';}}
 }
 function openChangePinModal(){
@@ -3273,7 +3656,8 @@ async function resetUserPin(){
   try{
     await hubApi('/admin/user-pin/reset',{method:'POST',body:JSON.stringify({user:target})});
     toast(`${target} PIN을 초기화했습니다`);
-  }catch(e){toast('PIN 초기화 실패: '+e.message,true);}
+    setAdminActionStatus(`${target} PIN 초기화 완료`);
+  }catch(e){toast('PIN 초기화 실패: '+e.message,true);setAdminActionStatus('PIN 초기화 실패: '+e.message,'err');}
 }
 async function resetAllHubData(){
   const msg='업무 링크, 노하우, EOS/라이선스, 개인 메모, VT 이력, AI 캐시/사용량/감사 로그를 초기화합니다. 관리자/시스템 설정은 유지됩니다.\n\n계속하려면 로그인 PIN을 입력해야 합니다.';
@@ -3288,8 +3672,9 @@ async function resetAllHubData(){
     LINKS=[];KNOWLEDGE=[];EOS_ITEMS=[];PRIVATE_ITEMS=[];VT_HISTORY=[];
     localStorage.removeItem('vt_history');
     toast(`초기화 완료: ${d.deleted||0}개 삭제${d.truncated?' · 일부 데이터가 남아 다시 실행 필요':''}`);
+    setAdminActionStatus(`전체 데이터 초기화 완료: ${d.deleted||0}개 삭제${d.truncated?' · 일부 데이터가 남아 다시 실행 필요':''}`);
     renderCurrent();
-  }catch(e){toast('초기화 실패: '+e.message,true);}
+  }catch(e){toast('초기화 실패: '+e.message,true);setAdminActionStatus('전체 데이터 초기화 실패: '+e.message,'err');}
   finally{if(btn){btn.disabled=false;btn.textContent=old||'⚠ 전체 데이터 초기화';}}
 }
 async function addAdmin(){
@@ -3299,26 +3684,29 @@ async function addAdmin(){
   try{
     const r=await fetch(`${WORKERS}/admin/update`,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:'add',user:name,role})});
     const d=await r.json();
-    if(!d.ok){toast(d.message||'실패',true);return;}
+    if(!d.ok){toast(d.message||'실패',true);setAdminActionStatus(d.message||'관리자 권한 추가 실패','err');return;}
     toast(`${name} (${role==='super'?'최상위':'일반'} 관리자) 추가`);loadSettings();
-  }catch(e){toast('오류: '+e.message,true);}
+    setAdminActionStatus(`${name} 관리자 권한 추가 완료`);
+  }catch(e){toast('오류: '+e.message,true);setAdminActionStatus('관리자 권한 추가 실패: '+e.message,'err');}
 }
 async function changeRole(name,newRole){
   try{
     const r=await fetch(`${WORKERS}/admin/update`,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:'changeRole',user:name,role:newRole})});
     const d=await r.json();
-    if(!d.ok){toast(d.message||'실패',true);loadSettings();return;}
+    if(!d.ok){toast(d.message||'실패',true);setAdminActionStatus(d.message||'관리자 권한 변경 실패','err');loadSettings();return;}
     toast(`${name} 권한 변경`);
-  }catch(e){toast('오류: '+e.message,true);}
+    setAdminActionStatus(`${name} 관리자 권한 변경 완료`);
+  }catch(e){toast('오류: '+e.message,true);setAdminActionStatus('관리자 권한 변경 실패: '+e.message,'err');}
 }
 async function removeAdmin(name){
   if(!confirm(`${name}의 관리자 권한을 회수하시겠어요?`))return;
   try{
     const r=await fetch(`${WORKERS}/admin/update`,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({action:'remove',user:name})});
     const d=await r.json();
-    if(!d.ok){toast(d.message||'실패',true);return;}
+    if(!d.ok){toast(d.message||'실패',true);setAdminActionStatus(d.message||'관리자 권한 회수 실패','err');return;}
     toast(`${name} 권한 회수`);loadSettings();
-  }catch(e){toast('오류: '+e.message,true);}
+    setAdminActionStatus(`${name} 관리자 권한 회수 완료`);
+  }catch(e){toast('오류: '+e.message,true);setAdminActionStatus('관리자 권한 회수 실패: '+e.message,'err');}
 }
 
 
@@ -3335,50 +3723,7 @@ function buildCustomers(){
   return Object.values(map).sort((a,b)=>b.issues.length-a.issues.length);
 }
 let CUST_SEL=null;
-function renderCustomers(){
-  const q=(document.getElementById("cust-q")||{}).value?.toLowerCase()||"";
-  const prod=(document.getElementById("cust-prod")||{}).value||"";
-  const ass=(document.getElementById("cust-ass")||{}).value||"";
-  let custs=buildCustomers();
-  const allProds=new Set();
-  const allAss=new Set();
-  buildCustomers().forEach(c=>{
-    c.products.forEach(p=>allProds.add(p));
-    c.assignees.forEach(a=>allAss.add(a));
-  });
-  const pdSel=document.getElementById("cust-prod");
-  if(pdSel){const cur=pdSel.value;pdSel.innerHTML='<option value="">전체 제품</option>'+Array.from(allProds).sort().map(p=>`<option ${p===cur?"selected":""}>${escapeHtml(p)}</option>`).join("");}
-  const assSel=document.getElementById("cust-ass");
-  if(assSel){const cur=assSel.value;assSel.innerHTML='<option value="">전체 담당자</option>'+Array.from(allAss).sort().map(a=>`<option ${a===cur?"selected":""}>${escapeHtml(a)}</option>`).join("");}
-  if(prod)custs=custs.filter(c=>c.products.has(prod));
-  if(ass)custs=custs.filter(c=>c.assignees.has(ass));
-  if(q)custs=custs.filter(c=>[c.name,[...c.products].join(" "),[...c.assignees].join(" ")].join(" ").toLowerCase().includes(q));
-  const wrap=document.getElementById("cust-list");
-  const pageCusts=sliceForPage(custs,'customers');
-  document.getElementById("cust-count").textContent=pageCountText('customers',custs.length,'개');
-  if(!pageCusts.length){wrap.innerHTML=`<div style="text-align:center;padding:40px;color:var(--text3);font-size:13px">Jira 동기화 후 자동 집계되거나 조건에 맞는 고객사가 없습니다</div>`;renderPager('cust-pager','customers',custs.length,'renderCustomers');return;}
-  wrap.innerHTML=pageCusts.map((c,idx)=>{
-    const done=c.issues.filter(i=>i.status==="완료").length;
-    const open=c.issues.filter(i=>i.status!=="완료").length;
-    const rate=c.issues.length?Math.round(done/c.issues.length*100):0;
-    const prods=[...c.products].join(", ")||"-";
-    const isSel=CUST_SEL&&CUST_SEL.name===c.name;
-    return `<div onclick="selectCustomer(${idx},this.dataset.name)" data-name="${escapeHtml(c.name)}" style="background:#262d47;border:1.5px solid ${isSel?"var(--accent)":"var(--border)"};border-radius:12px;padding:14px 16px;cursor:pointer;transition:all .15s">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <span style="font-size:13px;font-weight:700;color:#f0f4ff">${escapeHtml(c.name)}</span>
-        <span style="font-size:10px;background:rgba(196,206,255,.15);color:#c4ceff;padding:2px 9px;border-radius:20px;font-weight:700">${c.issues.length}건</span>
-      </div>
-      <div style="font-size:11px;color:var(--text3);margin-bottom:6px">${escapeHtml(prods)}</div>
-      <div style="display:flex;gap:10px;font-size:11px">
-        <span style="color:#2de6b8">완료 ${done}</span>
-        <span style="color:#fc8181">진행 ${open}</span>
-        <span style="color:var(--text3);margin-left:auto">완료율 ${rate}%</span>
-      </div>
-    </div>`;
-  }).join("");
-  renderPager('cust-pager','customers',custs.length,'renderCustomers');
-}
-
+// renderCustomers: duplicate removed, using definition below
 function selectCustomer(idx,name){
   CUST_SEL=buildCustomers().find(c=>c.name===name)||buildCustomers()[idx];
   renderCustomers();
@@ -3459,14 +3804,15 @@ function renderCustomerRight(){
 // ── 팀 노하우 ─────────────────────────────────────
 let KNOWLEDGE=[];
 async function loadKnowledge(){
-  try{const r=await fetch(`${WORKERS}/knowledge`);const d=await r.json();KNOWLEDGE=d.items||[];}catch{}
+  try{const r=await fetch(`${WORKERS}/knowledge`,{headers:authHeaders()});const d=await r.json();KNOWLEDGE=d.items||[];}catch{}
 }
 function renderKnowledge(){
+  renderCommentFeed('knowledge-comment-feed','knowledge',KNOWLEDGE);
   const prod=document.getElementById("know-prod")?.value||"";
   const cat=document.getElementById("know-cat")?.value||"";
   const q=(document.getElementById("know-q")?.value||"").toLowerCase();
   let list=KNOWLEDGE.filter(k=>{
-    const txt=[k.title,k.content,k.category,k.product,k.link,k.createdBy].join(" ").toLowerCase();
+    const txt=[k.title,k.content,k.category,k.product,k.link,k.createdBy,(k.comments||[]).map(c=>c.text).join(' ')].join(" ").toLowerCase();
     return (!prod||k.product===prod)&&(!cat||k.category===cat)&&(!q||txt.includes(q));
   });
   const cnt=document.getElementById('know-count');if(cnt)cnt.textContent=`총 ${list.length}건 · ${PAGE_SIZES.knowledge}건씩 표시`;
@@ -3475,7 +3821,8 @@ function renderKnowledge(){
   if(!pageKnowledge.length){wrap.innerHTML=`<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text3);font-size:13px">등록된 노하우가 없거나 조건에 맞는 노하우가 없습니다</div>`;renderPager('know-pager','knowledge',list.length,'renderKnowledge');return;}
   wrap.innerHTML=pageKnowledge.map(k=>{
     const href=normalizeExternalUrl(k.link||'');
-    return `<div class="card knowledge-card" onclick="openKnowledgeDetail('${k.id}')" style="padding:14px;position:relative;cursor:pointer"><div style="position:absolute;top:10px;right:10px;display:flex;gap:4px"><button onclick="event.stopPropagation();openKnowledgeModal('${k.id}')" style="background:transparent;border:0;color:var(--text3);cursor:pointer">✎</button><button onclick="event.stopPropagation();deleteKnowledge('${k.id}')" style="background:transparent;border:0;color:var(--danger);cursor:pointer">×</button></div><div style="display:flex;gap:6px;margin-bottom:8px"><span class="badge" style="background:${labelColor(k.product||'기타')}22;color:${labelColor(k.product||'기타')}">${escapeHtml(k.product||'기타')}</span><span class="badge" style="background:rgba(196,206,255,.12);color:#c4ceff">${escapeHtml(k.category||'')}</span></div><div style="font-size:14px;font-weight:800;color:#f0f4ff;margin-bottom:8px;padding-right:40px">${escapeHtml(k.title||'')}</div>${k.content?`<div class="knowledge-excerpt" style="font-size:12px;color:var(--text2);line-height:1.6;white-space:pre-wrap;margin-bottom:10px">${escapeHtml(k.content)}</div>`:''}${href?`<a onclick="event.stopPropagation()" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="font-size:11px;color:var(--cyan);text-decoration:none">참고 링크 ↗</a>`:''}<div style="font-size:10px;color:var(--text3);margin-top:10px">${escapeHtml(k.createdBy||'-')} · ${k.updatedAt?'수정 '+fd(k.updatedAt):fd(k.createdAt)}</div></div>`;
+    const commentCount=(k.comments||[]).length;
+    return `<div class="card knowledge-card" onclick="openKnowledgeDetail('${k.id}')" style="padding:14px;position:relative;cursor:pointer"><div style="position:absolute;top:10px;right:10px;display:flex;gap:4px"><button onclick="event.stopPropagation();openKnowledgeDetail('${k.id}')" style="background:transparent;border:0;color:var(--text3);cursor:pointer;font-size:11px">댓글 ${commentCount}</button><button onclick="event.stopPropagation();openKnowledgeModal('${k.id}')" style="background:transparent;border:0;color:var(--text3);cursor:pointer">✎</button><button onclick="event.stopPropagation();deleteKnowledge('${k.id}')" style="background:transparent;border:0;color:var(--danger);cursor:pointer">×</button></div><div style="display:flex;gap:6px;margin-bottom:8px"><span class="badge" style="background:${labelColor(k.product||'기타')}22;color:${labelColor(k.product||'기타')}">${escapeHtml(k.product||'기타')}</span><span class="badge" style="background:rgba(196,206,255,.12);color:#c4ceff">${escapeHtml(k.category||'')}</span></div><div style="font-size:14px;font-weight:800;color:#f0f4ff;margin-bottom:8px;padding-right:70px">${escapeHtml(k.title||'')}</div>${k.content?`<div class="knowledge-excerpt" style="font-size:12px;color:var(--text2);line-height:1.6;white-space:pre-wrap;margin-bottom:10px">${escapeHtml(k.content)}</div>`:''}${href?`<a onclick="event.stopPropagation()" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="font-size:11px;color:var(--cyan);text-decoration:none">참고 링크 ↗</a>`:''}<div style="font-size:10px;color:var(--text3);margin-top:10px">${escapeHtml(k.createdBy||'-')} · ${k.updatedAt?'수정 '+fd(k.updatedAt):fd(k.createdAt)}${commentCount?` · 댓글 ${commentCount}`:''}</div></div>`;
   }).join("");
   renderPager('know-pager','knowledge',list.length,'renderKnowledge');
 }
@@ -3491,7 +3838,8 @@ function openKnowledgeDetail(id){
     </div>
     <div style="font-size:13px;color:var(--text2);line-height:1.75;white-space:pre-wrap">${escapeHtml(k.content||'내용 없음')}</div>
     ${href?`<div style="margin-top:14px"><a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:var(--cyan);text-decoration:none">참고 링크 열기 ↗</a></div>`:''}
-    <div style="font-size:10px;color:var(--text3);margin-top:16px">${escapeHtml(k.createdBy||'-')} · ${k.updatedAt?'수정 '+fd(k.updatedAt):fd(k.createdAt)}</div>`,
+    <div style="font-size:10px;color:var(--text3);margin-top:16px">${escapeHtml(k.createdBy||'-')} · ${k.updatedAt?'수정 '+fd(k.updatedAt):fd(k.createdAt)}</div>
+    ${itemCommentsHtml('knowledge',k)}`,
     `<button class="btn btn-ghost" onclick="closeGenModal()" style="width:auto;padding:8px 18px">닫기</button>
      <button class="btn btn-indigo" onclick="openKnowledgeModal('${id}')" style="width:auto;padding:8px 18px">수정</button>`);
 }
@@ -3516,13 +3864,19 @@ function openKnowledgeModal(id){
 async function saveKnowledge(){
   const title=document.getElementById("know-form-title").value.trim();
   if(!title){toast("제목은 필수입니다",true);return;}
-  const body={product:document.getElementById("know-form-prod").value,category:document.getElementById("know-form-cat").value,title,content:document.getElementById("know-form-content").value.trim(),link:normalizeExternalUrl(document.getElementById("know-form-link").value.trim())};
+  const rawLink=document.getElementById("know-form-link").value.trim();
+  const link=normalizeExternalUrl(rawLink);
+  if(link&&!link.includes('broadcom.com')&&!confirm('입력한 링크가 broadcom.com 도메인이 아닙니다.\n계속 등록하시겠어요?'))return;
+  const body={product:document.getElementById("know-form-prod").value,category:document.getElementById("know-form-cat").value,title,content:document.getElementById("know-form-content").value.trim(),link};
   try{const r=await fetch(`${WORKERS}/knowledge`,{method:"POST",headers:authHeaders({"Content-Type":"application/json"}),body:JSON.stringify(body)});const d=await r.json();if(!d.ok){toast(d.message||"저장 실패",true);return;}toast("등록 완료");closeGenModal();await loadKnowledge();renderKnowledge();}catch(e){toast("오류: "+e.message,true);}
 }
 async function updateKnowledge(id){
   const title=document.getElementById("know-form-title").value.trim();
   if(!title){toast("제목은 필수입니다",true);return;}
-  const body={product:document.getElementById("know-form-prod").value,category:document.getElementById("know-form-cat").value,title,content:document.getElementById("know-form-content").value.trim(),link:normalizeExternalUrl(document.getElementById("know-form-link").value.trim())};
+  const rawLink=document.getElementById("know-form-link").value.trim();
+  const link=normalizeExternalUrl(rawLink);
+  if(link&&!link.includes('broadcom.com')&&!confirm('입력한 링크가 broadcom.com 도메인이 아닙니다.\n계속 수정하시겠어요?'))return;
+  const body={product:document.getElementById("know-form-prod").value,category:document.getElementById("know-form-cat").value,title,content:document.getElementById("know-form-content").value.trim(),link};
   try{const r=await fetch(`${WORKERS}/knowledge/${id}`,{method:"PUT",headers:authHeaders({"Content-Type":"application/json"}),body:JSON.stringify(body)});const d=await r.json();if(!d.ok){toast(d.message||"수정 실패",true);return;}toast("수정 완료");closeGenModal();await loadKnowledge();renderKnowledge();}catch(e){toast("오류: "+e.message,true);}
 }
 async function deleteKnowledge(id){
@@ -3669,9 +4023,9 @@ async function importRecentKBLinks(){
       if(cursor)qs.set('cursor',cursor);
       if(btn)btn.textContent=`KB 수집 중... ${batch}차`;
       const r=await fetch(`${WORKERS}/links/kb/import?${qs.toString()}`,{method:'POST',headers:authHeaders()});
-      if(!r.ok){toast('Worker 업데이트 후 사용 가능합니다',true);return;}
+      if(!r.ok){toast('Worker 업데이트 후 사용 가능합니다',true);setAdminActionStatus('KB 수집 실패: Worker 업데이트 후 사용 가능합니다','err');return;}
       const d=await r.json();
-      if(d.ok===false){toast(d.message||'KB 수집 설정이 필요합니다',true);return;}
+      if(d.ok===false){toast(d.message||'KB 수집 설정이 필요합니다',true);setAdminActionStatus(d.message||'KB 수집 설정이 필요합니다','err');return;}
       imported+=d.imported||d.added||0;
       duplicated+=d.duplicated||d.skipped||0;
       inaccessible+=d.inaccessible||0;
@@ -3686,7 +4040,8 @@ async function importRecentKBLinks(){
     if(document.getElementById('page-links')?.classList.contains('active'))renderLinks();
     const searchNote=attempts?` / 검색 API ${attempts}회`:' / 검색 API 0회';
     toast(`KB 무료 수집 완료: 신규 ${imported}건 / 중복 ${duplicated}건 / 접근불가 ${inaccessible}건${searchNote}${errors?` / 오류 ${errors}회`:''}`);
-  }catch(e){toast('오류: '+e.message,true);}
+    setAdminActionStatus(`KB 수집 완료: 신규 ${imported}건 / 중복 ${duplicated}건 / 접근불가 ${inaccessible}건${errors?` / 오류 ${errors}회`:''}`);
+  }catch(e){toast('오류: '+e.message,true);setAdminActionStatus('KB 수집 실패: '+e.message,'err');}
   finally{if(btn){btn.disabled=false;btn.textContent=oldText||'📥 무료 KB article 수집';}}
 }
 async function importKBSeed(){
@@ -3710,6 +4065,7 @@ async function importKBSeed(){
   btn.disabled=false;
   btn.textContent=`📥 KB 초기 데이터 가져오기 (${KB_SEED.length}건)`;
   toast(`완료: 성공 ${ok}건 / 실패 ${fail}건`);
+  setAdminActionStatus(`KB 초기 데이터 등록 완료: 성공 ${ok}건 / 실패 ${fail}건`,fail?'info':'ok');
   await loadLinks();
   if(document.getElementById('page-links').classList.contains('active'))renderLinks();
 }
@@ -3790,7 +4146,8 @@ async function refreshStorageStats(){
         </div>`).join('')}
       </div>
       <div style="margin-top:8px;font-size:10px;color:var(--text3)">갱신 ${fmtClock(d.asOf)} · 삭제/정리 작업은 수행하지 않음</div>`;
-  }catch(e){wrap.innerHTML=`<span style="color:var(--danger)">조회 실패: ${escapeHtml(e.message)}</span>`;}
+    setAdminActionStatus('저장소 / KV 사용량 조회 완료');
+  }catch(e){wrap.innerHTML=`<span style="color:var(--danger)">조회 실패: ${escapeHtml(e.message)}</span>`;setAdminActionStatus('저장소 / KV 사용량 조회 실패: '+e.message,'err');}
   finally{btn.disabled=false;btn.textContent=old;}
 }
 
@@ -4057,7 +4414,7 @@ function issueRow(i){
   const caseHtml=cases.length?`<span class="imeta">케이스</span>${cases.map(c=>`<span class="case-chip ${c.done?'done':(c.status==='미동기화'?'':'open')}" title="${escapeHtml(c.status)}${c.key?' · '+escapeHtml(c.key):''}">${escapeHtml(c.num)} · ${escapeHtml(c.status)}</span>`).join('')}`:'';
   return `<div class="irow${active}" data-key="${escapeHtml(i.key)}" style="--lc:${sc}"><div class="irow-top"><span class="ikey">${i.key}</span><span class="badge" style="background:${sc}22;color:${sc}">${i.status}</span><span class="badge" style="background:${pc}22;color:${pc}">${i.pri}</span><span class="ititle">${escapeHtml(cleanTitle(i.title))}</span><span class="imeta">${escapeHtml(i.customer||'-')}</span></div><div class="irow-bot">${(i.labels||[]).map(l=>`<span class="badge" style="background:${labelColor(l)}22;color:${labelColor(l)}">${escapeHtml(l)}</span>`).join('')}<span class="imeta">@${escapeHtml(i.assignee)}</span><span class="imeta">${fd(i.date)}</span>${caseHtml}</div></div>`;
 }
-function renderIssues(){
+function renderIssues_legacy_v2(){
   const list=filteredIssues();
   list.sort((a,b)=>new Date(b.date)-new Date(a.date));
   const size=parseInt(document.getElementById('f-pg')?.value||'10');
@@ -4093,7 +4450,7 @@ async function selectCase(c){
   renderCaseRight(false);
   if(window.innerWidth<=700)syncMobSheet('case-right');
 }
-function renderCases(){
+function renderCases_legacy_v2(){
   const q=(document.getElementById('case-q')||{}).value?.toLowerCase()||'';
   const cStat=document.getElementById('case-stat')?.value||'';
   const cAss=document.getElementById('case-ass')?.value||'';
@@ -4183,12 +4540,16 @@ async function runCaseAI(mode='summary'){
 function renderOverdueBanner(){
   const OVERDUE_DAYS=7;
   const overdue=getGeneralIssues().filter(i=>isOpenStatus(i.status)&&daysSince(i.date)>=OVERDUE_DAYS);
+  const myOpen=getGeneralIssues().filter(i=>isMyIssue(i)&&isOpenStatus(i.status));
   const wrap=document.getElementById('overdue-banner-wrap');
   if(!wrap)return;
-  if(!overdue.length){wrap.innerHTML='';return;}
+  if(!overdue.length&&!myOpen.length){wrap.innerHTML='';return;}
   const byAss={};overdue.forEach(i=>{byAss[i.assignee]=(byAss[i.assignee]||0)+1;});
   const topAss=Object.entries(byAss).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([n,c])=>`${escapeHtml(n)} ${c}건`).join(', ');
-  wrap.innerHTML=`<div style="background:linear-gradient(135deg,rgba(251,191,36,.1),rgba(248,113,113,.08));border:1px solid rgba(251,191,36,.3);border-radius:12px;padding:12px 18px;margin-bottom:14px;display:flex;align-items:center;gap:12px"><span style="font-size:22px">🚨</span><div style="flex:1"><div style="font-size:13px;font-weight:700;color:var(--warn);margin-bottom:2px">${OVERDUE_DAYS}일 이상 미완료 일반 이슈 ${overdue.length}건</div><div style="font-size:11px;color:var(--text2)">필터 기준: 케이스 제외 · 미완료/진행 상태 · 접수/수정일 기준 ${OVERDUE_DAYS}일 이상 · 주요 담당자: ${topAss}</div></div><button title="7일 이상 미완료 일반 이슈 목록을 엽니다" onclick="setIssueNavigationFilter({preset:{kind:'overdue',label:'7일 이상 미완료 일반 이슈'}})" style="background:rgba(251,191,36,.2);border:1px solid rgba(251,191,36,.4);color:var(--warn);padding:6px 14px;border-radius:8px;font-size:11px;cursor:pointer;font-family:inherit;font-weight:700">이슈 보기 →</button></div>`;
+  const overduePart=overdue.length?`<div style="flex:1;min-width:240px;background:linear-gradient(135deg,rgba(251,191,36,.1),rgba(248,113,113,.08));border:1px solid rgba(251,191,36,.3);border-radius:12px;padding:12px 18px;display:flex;align-items:center;gap:12px"><span style="font-size:22px">🚨</span><div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:700;color:var(--warn);margin-bottom:2px">${OVERDUE_DAYS}일 이상 미완료 일반 이슈 ${overdue.length}건</div><div style="font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">필터 기준: 케이스 제외 · 미완료/진행 상태 · 접수/수정일 기준 ${OVERDUE_DAYS}일 이상 · 주요 담당자: ${topAss}</div></div><button title="7일 이상 미완료 일반 이슈 목록을 엽니다" onclick="setIssueNavigationFilter({preset:{kind:'overdue',label:'7일 이상 미완료 일반 이슈'}})" style="background:rgba(251,191,36,.2);border:1px solid rgba(251,191,36,.4);color:var(--warn);padding:6px 14px;border-radius:8px;font-size:11px;cursor:pointer;font-family:inherit;font-weight:700;white-space:nowrap">이슈 보기 →</button></div>`:'';
+  const myLabel=myOpen.length?`담당자: ${escapeHtml(CURRENT_DISPLAY||CURRENT_USER)} · 미완료/진행 ${myOpen.length}건`:'현재 담당 미완료 이슈 없음';
+  const myPart=`<div style="flex:1;min-width:240px;background:linear-gradient(135deg,rgba(99,102,241,.12),rgba(139,92,246,.08));border:1px solid rgba(99,102,241,.35);border-radius:12px;padding:12px 18px;display:flex;align-items:center;gap:12px;cursor:pointer" onclick="setIssueNavigationFilter({preset:{kind:'myopen',label:'내 미완료 이슈'}})"><span style="font-size:22px">📋</span><div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:700;color:#a5b4fc;margin-bottom:2px">내 미완료 이슈 ${myOpen.length}건</div><div style="font-size:11px;color:var(--text2)">${myLabel}</div></div><button style="background:rgba(99,102,241,.2);border:1px solid rgba(99,102,241,.4);color:#a5b4fc;padding:6px 14px;border-radius:8px;font-size:11px;cursor:pointer;font-family:inherit;font-weight:700;white-space:nowrap" onclick="event.stopPropagation();setIssueNavigationFilter({preset:{kind:'myopen',label:'내 미완료 이슈'}})">내 이슈 보기 →</button></div>`;
+  wrap.innerHTML=`<div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">${overduePart}${myPart}</div>`;
 }
 function renderOpsFocus(){
   const overdue=getGeneralIssues().filter(i=>isOpenStatus(i.status)&&daysSince(i.date)>=7).sort((a,b)=>daysSince(b.date)-daysSince(a.date)).slice(0,5);
@@ -4437,6 +4798,7 @@ function filterByPreset(list,preset){
   let out=list;
   if(preset.kind==='status')out=out.filter(i=>preset.status==='done'?isDoneStatus(i.status):preset.status==='open'?isOpenStatus(i.status):true);
   if(preset.kind==='my')out=out.filter(isMyIssue);
+  if(preset.kind==='myopen')out=out.filter(i=>isMyIssue(i)&&isOpenStatus(i.status));
   if(preset.kind==='stale'||preset.kind==='overdue')out=out.filter(i=>isOpenStatus(i.status)&&age(i.date)>=7);
   if(preset.kind==='high')out=out.filter(i=>isOpenStatus(i.status)&&String(i.pri||'').toLowerCase().includes('high'));
   if(preset.kind==='customer')out=out.filter(i=>(i.customer||'')===preset.customer);
@@ -4513,7 +4875,7 @@ function refreshFilters(){
   applyV151Dom();
 }
 
-function renderDash(){
+function renderDash_legacy_v2(){
   applyV153Dom();
   const g=getGeneralIssues();
   const c=getCaseIssueBase();
@@ -4728,7 +5090,7 @@ function setCaseNavigationFilter(opts={}){
   if(opts.dateDays&&document.getElementById('case-date'))document.getElementById('case-date').value=String(opts.dateDays);
   PAGE_STATE.cases=1;showPage('cases');
 }
-function renderIssues(){
+function renderIssues_legacy_v3(){
   const wrap=document.getElementById('issue-list-wrap'); if(!wrap)return;
   const arr=getFilteredIssues(); const size=parseInt(document.getElementById('f-pg')?.value||'10');
   const max=Math.max(1,Math.ceil(arr.length/size)); if(PAGE>max)PAGE=max; if(PAGE<1)PAGE=1;
@@ -4750,7 +5112,7 @@ function renderIssues(){
   renderIssueFilterTags(); renderRightPanel(false);
   if(SEL&&!SEL._detailLoaded){ensureIssueDetail(SEL).then(()=>renderRightPanel(false));}
 }
-function renderCases(){
+function renderCases_legacy_v3(){
   const q=(document.getElementById('case-q')||{}).value?.toLowerCase()||'';
   const cStat=document.getElementById('case-stat')?.value||''; const cAss=document.getElementById('case-ass')?.value||''; const cSla=parseInt(document.getElementById('case-sla')?.value||'0'); const cDate=parseInt(document.getElementById('case-date')?.value||'0');
   let cases=getCases().filter(c=>{
@@ -4925,7 +5287,7 @@ function injectV155Style(){
       .top-status-card,.top-pin,.top-refresh,.top-logout{flex:0 0 auto;height:32px;min-height:32px;border-radius:999px;padding:0 9px;white-space:nowrap}
       .top-status-card{gap:6px}.top-status-card .label{display:none}.top-status-card .value{font-size:10px}.top-status-card .dot{width:7px;height:7px}.top-pin,.top-logout{font-size:10px}.top-refresh{width:32px;padding:0}
       .sec-title{font-size:15px;margin:6px 0 10px}.alert{padding:10px 12px;font-size:11px;line-height:1.55}
-      .chart-grid,.two-col,.storage-summary-top,.storage-grid,.link-grid{grid-template-columns:1fr!important;gap:10px!important}
+      .chart-grid,.two-col,.storage-summary-top,.storage-grid{grid-template-columns:1fr!important;gap:10px!important}
       .filter-row{display:grid!important;grid-template-columns:1fr!important;gap:6px!important;align-items:stretch!important}
       .filter-row input,.filter-row select,.filter-row button,.page-size-select{width:100%!important;min-width:0!important;max-width:100%!important;height:36px;font-size:12px;margin:0!important}
       .private-editor .filter-row{display:grid!important;grid-template-columns:1fr 1fr!important}
@@ -4945,6 +5307,10 @@ function injectV155Style(){
       .eos-table,.audit-table{display:block;width:100%;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border-spacing:0}.eos-table thead,.eos-table tbody,.eos-table tr,.audit-table thead,.audit-table tbody,.audit-table tr{min-width:620px}.eos-table th,.eos-table td,.audit-table th,.audit-table td{white-space:nowrap}
       .audit-detail{max-width:220px;white-space:nowrap}.pager{gap:6px;flex-wrap:wrap}.pager button{min-width:64px}
       [style*="minmax(320px"],[style*="minmax(340px"],[style*="grid-template-columns:repeat(auto-fit,minmax(320px"],[style*="grid-template-columns:repeat(auto-fit,minmax(340px"]{grid-template-columns:1fr!important}
+      .link-desc,.link-url,.link-meta{display:none!important}
+      .link-card{gap:8px;min-height:38px;padding:6px 10px}
+      .link-cat{min-width:52px!important;font-size:8px}
+      .link-card .link-actions{opacity:1!important}
     }
   `;
   document.head.appendChild(st);
@@ -5101,7 +5467,7 @@ function renderIssues(){
   renderIssueFilterTags();
   renderRightPanel(false);
 }
-function renderCases(){
+function renderCases_legacy_v4(){
   normalizeAllIssueAliases();
   const wrap=document.getElementById('case-list'); if(!wrap)return;
   const arr=getFilteredCases();
@@ -5283,6 +5649,7 @@ function filterByPreset(list,preset){
   let out=list;
   if(preset.kind==='status')out=out.filter(i=>preset.status==='done'?isDoneStatus(i.status):preset.status==='open'?isOpenStatus(i.status):true);
   if(preset.kind==='my')out=out.filter(isMyIssue);
+  if(preset.kind==='myopen')out=out.filter(i=>isMyIssue(i)&&isOpenStatus(i.status));
   if(preset.kind==='stale'||preset.kind==='overdue')out=out.filter(i=>isOpenStatus(i.status)&&age(i.date)>=7);
   if(preset.kind==='high')out=out.filter(i=>isOpenStatus(i.status)&&String(i.pri||'').toLowerCase().includes('high'));
   if(preset.kind==='customer')out=out.filter(i=>isCaseIssue(i)?caseCustomerName(i)===preset.customer:(i.customer||'')===preset.customer);
@@ -5558,7 +5925,7 @@ function syncMobSheet(panelId){
 }
 
 /* ── v1.5.8: mobile app polish + admin alignment ───────────── */
-/* ── v1.5.9: soft light/dark theme toggle ───────────── */
+/* ── v1.5.11: session revoke + comment feed ───────────── */
 /* mobile primary nav + compact admin settings */
 const MOBILE_PRIMARY_NAV=['nav-dash','nav-issues','nav-cases','nav-customers'];
 const MOBILE_MORE_NAV=['nav-eos','nav-log','nav-vt','nav-links','nav-knowledge','nav-private','nav-audit','nav-settings'];
@@ -5726,7 +6093,7 @@ function injectV158Style(){
       .btn-ghost,.filter-reset{background:#fff!important;border:1px solid #dbe3ef!important;color:#334155!important;box-shadow:none!important}
       .btn{box-shadow:none!important}
       .btn:hover{transform:none!important}
-      .two-col,.chart-grid,.link-grid,.storage-summary-top,.storage-grid,.vt-grid{grid-template-columns:1fr!important}
+      .two-col,.chart-grid,.storage-summary-top,.storage-grid,.vt-grid{grid-template-columns:1fr!important}
       .rpanel{position:static!important;max-height:none!important;background:#fff!important;color:#111827!important;border-color:#e3e8f2!important;box-shadow:0 2px 12px rgba(15,23,42,.04)!important}
       .rp-desc,.rp-comment-item,.rp-meta,.rp-row{background:#f8fafc!important;border-color:#e3e8f2!important;color:#334155!important}
       .rp-row span:last-child{color:#0f172a!important}

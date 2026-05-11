@@ -1,9 +1,27 @@
-// ENGR HUB Cloudflare Worker v1.5.8
+﻿// ENGR HUB Cloudflare Worker v1.5.11
 //
 //
 //
+const ALLOWED_ORIGINS = [
+  'https://engr-jira.github.io',
+  'https://engr-jira.github.io/engr-hub',
+  'https://engr-jira.github.io/engr-hub-dev',
+];
+
+function getCorsHeaders(request) {
+  const origin = request?.headers?.get('Origin') || '';
+  const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return {
+    'Access-Control-Allow-Origin': allowed,
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User, X-Session-Token',
+    'Vary': 'Origin',
+  };
+}
+
+// Legacy static headers (OPTIONS preflight 전용)
 const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin': 'https://engr-jira.github.io',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User, X-Session-Token',
 };
@@ -21,10 +39,11 @@ const DEFAULT_USERS = [
 ];
 const DEFAULT_KV_STORAGE_LIMIT_BYTES = 1024 * 1024 * 1024; // Cloudflare Workers KV default 1GB basis
 
-function corsResponse(body, status = 200) {
+function corsResponse(body, status = 200, request = null) {
+  const headers = request ? getCorsHeaders(request) : CORS_HEADERS;
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...CORS_HEADERS, 'Content-Type': 'application/json; charset=utf-8' },
+    headers: { ...headers, 'Content-Type': 'application/json; charset=utf-8' },
   });
 }
 
@@ -55,12 +74,28 @@ async function createSession(env, user, minutes = 120) {
   return token;
 }
 
+async function revokeUserSessions(env, user) {
+  const id = normalizeUserId(user);
+  if (!id) return;
+  await env.ENGR_KV.put(`session:revokedBefore:${id}`, new Date().toISOString(), { expirationTtl: 60 * 60 * 48 });
+}
+
 async function getSessionUser(env, token) {
   if (!token) return '';
   try {
     const hash = await sha256Hex(token);
     const raw = await env.ENGR_KV.get(`session:${hash}`);
-    return raw ? (JSON.parse(raw).user || '') : '';
+    if (!raw) return '';
+    const session = JSON.parse(raw);
+    const user = normalizeUserId(session.user || '');
+    if (!user) return '';
+    const revokedBefore = await env.ENGR_KV.get(`session:revokedBefore:${user}`);
+    if (revokedBefore) {
+      const createdAt = Date.parse(session.createdAt || 0);
+      const revokedAt = Date.parse(revokedBefore);
+      if (Number.isFinite(createdAt) && Number.isFinite(revokedAt) && createdAt <= revokedAt) return '';
+    }
+    return user;
   } catch (_) {
     return '';
   }
@@ -128,6 +163,26 @@ async function saveUserAccount(env, account) {
   await env.ENGR_KV.put('config:users', JSON.stringify(Object.values(users)));
   return users[id];
 }
+async function deactivateUserAccount(env, idRaw) {
+  const id = normalizeUserId(idRaw);
+  if (!id) throw new Error('\uB300\uC0C1 \uC0AC\uC6A9\uC790\uB97C \uC120\uD0DD\uD558\uC138\uC694.');
+  if (id === SUPER_ADMIN) throw new Error('\uCD5C\uACE0 \uAD00\uB9AC\uC790\uB294 \uBE44\uD65C\uC131\uD654\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.');
+  const users = await getUsers(env);
+  const account = users[id];
+  if (!account) return null;
+  users[id] = { ...account, active: false };
+  users[SUPER_ADMIN] = users[SUPER_ADMIN] || { id: SUPER_ADMIN, displayName: 'mj.park', role: 'super', active: true };
+  users[SUPER_ADMIN].role = 'super';
+  users[SUPER_ADMIN].active = true;
+  await env.ENGR_KV.put('config:users', JSON.stringify(Object.values(users)));
+
+  const admins = await getAdmins(env, { skipUsers: true });
+  delete admins[id];
+  admins[SUPER_ADMIN] = 'super';
+  await env.ENGR_KV.put('config:admins', JSON.stringify(admins));
+  await revokeUserSessions(env, id);
+  return users[id];
+}
 
 // Team ID validation
 function getTeamNames(env) {
@@ -165,6 +220,48 @@ async function canModifyItem(env, user, item) {
   if (!user || !item) return false;
   if (await isAdmin(env, user)) return true;
   return item.createdBy === user;
+}
+function cleanCommentText(text = '') {
+  return String(text || '').trim().slice(0, 2000);
+}
+async function addCollectionComment(env, key, id, user, text, auditType) {
+  const body = cleanCommentText(text);
+  if (!body) return { status: 400, body: { ok: false, message: '\uB313\uAE00 \uB0B4\uC6A9\uC744 \uC785\uB825\uD558\uC138\uC694.' } };
+  const raw = await env.ENGR_KV.get(key);
+  const items = raw ? JSON.parse(raw) : [];
+  const target = items.find(item => item.id === id);
+  if (!target) return { status: 404, body: { ok: false, message: '\uB300\uC0C1\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.' } };
+  const now = new Date().toISOString();
+  const comment = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    text: body,
+    createdBy: user,
+    createdAt: now,
+  };
+  target.comments = Array.isArray(target.comments) ? target.comments : [];
+  target.comments.push(comment);
+  if (target.comments.length > 100) target.comments = target.comments.slice(-100);
+  target.updatedAt = now;
+  await env.ENGR_KV.put(key, JSON.stringify(items));
+  await auditLog(env, user, auditType, { id, commentId: comment.id });
+  return { status: 200, body: { ok: true, comment }, item: target };
+}
+async function deleteCollectionComment(env, key, id, commentId, user, auditType) {
+  const raw = await env.ENGR_KV.get(key);
+  const items = raw ? JSON.parse(raw) : [];
+  const target = items.find(item => item.id === id);
+  if (!target) return { status: 404, body: { ok: false, message: '\uB300\uC0C1\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.' } };
+  const comments = Array.isArray(target.comments) ? target.comments : [];
+  const comment = comments.find(c => c.id === commentId);
+  if (!comment) return { status: 404, body: { ok: false, message: '\uB313\uAE00\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.' } };
+  if (!await isAdmin(env, user) && comment.createdBy !== user) {
+    return { status: 403, body: { ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC0AD\uC81C\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' } };
+  }
+  target.comments = comments.filter(c => c.id !== commentId);
+  target.updatedAt = new Date().toISOString();
+  await env.ENGR_KV.put(key, JSON.stringify(items));
+  await auditLog(env, user, auditType, { id, commentId });
+  return { status: 200, body: { ok: true, deleted: 1 } };
 }
 async function loadPrivateNotes(env, user) {
   const key = `private:${user}:notes`;
@@ -1063,8 +1160,8 @@ async function resetHubData(env) {
 
 //
 export default {
-  async fetch(request, env) {
-    if (request.method === 'OPTIONS') return new Response(null, { headers: CORS_HEADERS });
+  async fetch(request, env, ctx) {
+    if (request.method === 'OPTIONS') return new Response(null, { headers: getCorsHeaders(request) });
 
     const url = new URL(request.url);
     const path = url.pathname;
@@ -1081,7 +1178,10 @@ export default {
 
       //
       if (path === '/debug/ai') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        if (!await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 사용할 수 있습니다.' }, 403);
         const result = await callAI(env, 'Reply with test success in Korean.', 'debug');
+        await auditLog(env, user, 'AI_DEBUG', { path: '/debug/ai' });
         return corsResponse({ ok: true, text: result?.candidates?.[0]?.content?.parts?.[0]?.text });
       }
 
@@ -1169,7 +1269,14 @@ export default {
         return corsResponse({ sessionMin: parseInt(sessionRaw || '120') || 120, rangeMonths: parseInt(rangeRaw || '6') || 6, lastSync });
       }
       if (path === '/kv/usage' && request.method === 'GET') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 접근할 수 있습니다.' }, 403);
         return corsResponse(await getUsage(env, user));
+      }
+      // 일반 유저용 개인 AI 사용량 (팀 통계 미포함)
+      if (path === '/kv/usage/me' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        const usage = await getUsage(env, user);
+        return corsResponse({ ok: true, me: usage.me, asOf: usage.asOf, timezone: usage.timezone, source: usage.source });
       }
       if (path === '/links/kb/import' && request.method === 'POST') {
         if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: 'Forbidden' }, 403);
@@ -1205,6 +1312,19 @@ export default {
         const { contents, mode = 'technical_analysis', detail = {} } = body;
         const prompt = contents?.[0]?.parts?.[0]?.text;
         if (!prompt) return corsResponse({ ok: false, message: '\uD504\uB86C\uD504\uD2B8\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.' }, 400);
+
+        // AI daily rate limit check
+        const AI_DAILY_LIMIT = parseInt(env.AI_DAILY_LIMIT || '300', 10);
+        const AI_USER_DAILY_LIMIT = parseInt(env.AI_USER_DAILY_LIMIT || '80', 10);
+        try {
+          const usageNow = await readUsageCounter(env, user);
+          if ((usageNow?.team?.today || 0) >= AI_DAILY_LIMIT) {
+            return corsResponse({ ok: false, message: `\ud300 \uc77c\uc77c AI \uc694\uccad \ud55c\ub3c4(${AI_DAILY_LIMIT}\ud68c)\uc5d0 \ub3c4\ub2ec\ud588\uc2b5\uB2C8\uB2E4.` }, 429);
+          }
+          if ((usageNow?.me?.today || 0) >= AI_USER_DAILY_LIMIT) {
+            return corsResponse({ ok: false, message: `\uac1c\uc778 \uc77c\uc77c AI \uc694\uccad \ud55c\ub3c4(${AI_USER_DAILY_LIMIT}\ud68c)\uc5d0 \ub3c4\ub2ec\ud588\uc2b5\uB2C8\uB2E4.` }, 429);
+          }
+        } catch (_) {}
 
         const reqId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
         try {
@@ -1286,7 +1406,7 @@ export default {
         const admins = await getAdmins(env);
         const users = await getUsers(env);
         const teamNames = Object.keys(users).filter(id => users[id].active !== false);
-        const teamUsers = teamNames.map(id => ({
+        const teamUsers = Object.keys(users).sort().map(id => ({
           id,
           displayName: users[id].displayName || id,
           role: users[id].role || admins[id] || 'user',
@@ -1315,6 +1435,19 @@ export default {
         await env.ENGR_KV.put('config:admins', JSON.stringify(admins));
         await auditLog(env, user, 'USER_SAVE', { target: account.id, role: account.role });
         return corsResponse({ ok: true, user: account });
+      }
+
+      if (path.startsWith('/admin/users/') && request.method === 'DELETE') {
+        if (!hasSession || !await isSuper(env, user)) return corsResponse({ ok: false, message: 'Forbidden' }, 403);
+        const target = decodeURIComponent(path.split('/')[3] || '');
+        try {
+          const account = await deactivateUserAccount(env, target);
+          if (!account) return corsResponse({ ok: false, message: '\uB4F1\uB85D\uB41C \uACC4\uC815\uC774 \uC544\uB2D9\uB2C8\uB2E4.' }, 404);
+          await auditLog(env, user, 'USER_DISABLE', { target: account.id });
+          return corsResponse({ ok: true, user: account.id, active: false });
+        } catch (e) {
+          return corsResponse({ ok: false, message: e.message || '\uC0AC\uC6A9\uC790 \uBE44\uD65C\uC131\uD654 \uC2E4\uD328' }, 400);
+        }
       }
 
       //
@@ -1456,6 +1589,7 @@ export default {
 
       //
       if (path === '/links' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
         const raw = await env.ENGR_KV.get('config:links');
         return corsResponse({ ok: true, links: raw ? JSON.parse(raw) : [] });
       }
@@ -1471,6 +1605,7 @@ export default {
           url: body.url || '',
           category: body.category || '\u6E72\uACE0?',
           desc: body.desc || '',
+          comments: [],
           createdBy: user,
           createdAt: new Date().toISOString(),
         };
@@ -1478,6 +1613,21 @@ export default {
         await env.ENGR_KV.put('config:links', JSON.stringify(links));
         await auditLog(env, user, 'LINK_ADD', { title: newLink.title });
         return corsResponse({ ok: true, link: newLink });
+      }
+      if (path.match(/^\/links\/[^/]+\/comments(?:\/[^/]+)?$/)) {
+        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        const parts = path.split('/');
+        const id = decodeURIComponent(parts[2] || '');
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          const result = await addCollectionComment(env, 'config:links', id, user, body.text, 'LINK_COMMENT_ADD');
+          return corsResponse(result.body, result.status);
+        }
+        if (request.method === 'DELETE') {
+          const commentId = decodeURIComponent(parts[4] || '');
+          const result = await deleteCollectionComment(env, 'config:links', id, commentId, user, 'LINK_COMMENT_DELETE');
+          return corsResponse(result.body, result.status);
+        }
       }
       //
       if (path.startsWith('/links/') && request.method === 'PUT') {
@@ -1511,6 +1661,7 @@ export default {
 
       //
       if (path === '/knowledge' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
         const raw = await env.ENGR_KV.get('config:knowledge');
         return corsResponse({ ok: true, items: raw ? JSON.parse(raw) : [] });
       }
@@ -1573,6 +1724,7 @@ export default {
           title: body.title || '',
           content: body.content || '',
           link: body.link || '',
+          comments: [],
           createdBy: user,
           createdAt: new Date().toISOString(),
         };
@@ -1580,6 +1732,21 @@ export default {
         await env.ENGR_KV.put('config:knowledge', JSON.stringify(items));
         await auditLog(env, user, 'KNOWLEDGE_ADD', { product: newItem.product, title: newItem.title });
         return corsResponse({ ok: true, item: newItem });
+      }
+      if (path.match(/^\/knowledge\/[^/]+\/comments(?:\/[^/]+)?$/)) {
+        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        const parts = path.split('/');
+        const id = decodeURIComponent(parts[2] || '');
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          const result = await addCollectionComment(env, 'config:knowledge', id, user, body.text, 'KNOWLEDGE_COMMENT_ADD');
+          return corsResponse(result.body, result.status);
+        }
+        if (request.method === 'DELETE') {
+          const commentId = decodeURIComponent(parts[4] || '');
+          const result = await deleteCollectionComment(env, 'config:knowledge', id, commentId, user, 'KNOWLEDGE_COMMENT_DELETE');
+          return corsResponse(result.body, result.status);
+        }
       }
       //
       if (path.startsWith('/knowledge/') && request.method === 'PUT') {
@@ -1666,11 +1833,15 @@ export default {
         return corsResponse({ ok: true });
       }
 
+
       return corsResponse({ ok: false, message: '\uC5C6\uB294 \uACBD\uB85C\uC785\uB2C8\uB2E4.' }, 404);
     } catch (err) {
       return corsResponse({ ok: false, message: err.message || '\uC11C\uBC84 \uC624\uB958' }, 500);
     }
   },
+
+  // \u2500\u2500 Cron Scheduled Handler \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  async scheduled(event, env, ctx) {
+    // no scheduled tasks
+  },
 };
-
-

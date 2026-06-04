@@ -13,5 +13,9 @@
       "binding": "ENGR_KV",
       "id": "82629753261d41869b55bbd652c17ce1"
     }
-  ]
+  ],
+  "vars": {
+    "VAPID_PUBLIC_KEY": "BL4LqjU9WFgx6kRXPMSEgrD0_e7P2cFafDK5dVWQlUrCRvrYKNKrvHxZ9gzLKSoKCpTDLg_Fgweps1ERO6UCndw",
+    "VAPID_SUBJECT": "mailto:passikmj@gmail.com"
+  }
 }

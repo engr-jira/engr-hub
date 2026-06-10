@@ -14,8 +14,19 @@
       "id": "82629753261d41869b55bbd652c17ce1"
     }
   ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "engr-hub-prod-db",
+      "database_id": "bf9e3d60-88a2-460b-9e66-81af2cfa92e0"
+    }
+  ],
   "vars": {
+    "KB_ALLOW_PAID_SEARCH": "false",
     "VAPID_PUBLIC_KEY": "BL4LqjU9WFgx6kRXPMSEgrD0_e7P2cFafDK5dVWQlUrCRvrYKNKrvHxZ9gzLKSoKCpTDLg_Fgweps1ERO6UCndw",
     "VAPID_SUBJECT": "mailto:passikmj@gmail.com"
+  },
+  "triggers": {
+    "crons": ["30 23 * * *"]
   }
 }

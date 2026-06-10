@@ -238,7 +238,7 @@ function isValidVtHash(hash = '') {
 function vtDetectType(v = '') {
   const s = String(v).trim();
   if (isValidVtHash(s)) return 'hash';
-  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(s) || /^[0-9a-f:]+:[0-9a-f:]+$/i.test(s)) return 'ip';
+  if (/^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/.test(s) || /^[0-9a-f:]+:[0-9a-f:]+$/i.test(s)) return 'ip';  // L-23: IPv4 옥텟 0-255 검증
   if (/^https?:\/\//i.test(s) || s.includes('/')) return 'url';
   if (/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(s)) return 'domain';
   return '';
@@ -314,8 +314,8 @@ async function loadPrivateNotes(env, user) {
     const legacyKey = `private:${account.displayName}:notes`;
     const legacyRaw = await env.ENGR_KV.get(legacyKey);
     if (legacyRaw) {
-      const items = JSON.parse(legacyRaw);
-      await env.ENGR_KV.put(key, JSON.stringify(items.slice(0, 300)));
+      const items = JSON.parse(legacyRaw).slice(0, 300);   // L-1: 저장본과 동일하게 슬라이스해 반환(첫 GET 초과노출 방지)
+      await env.ENGR_KV.put(key, JSON.stringify(items));
       return { key, items, migratedFrom: legacyKey };
     }
   }
@@ -419,13 +419,16 @@ async function auditLog(env, user, type, detail = {}) {
     const now = Date.now();
     const rand = crypto.randomUUID().slice(0, 8);
     const rev = String(9999999999999 - now).padStart(13, '0');
-    const item = JSON.stringify({
-      ts: new Date(now).toISOString(),
-      tsNum: now,
-      user, type, ...detail,
-    });
+    const id = `${rev}:${type}:${rand}`;
+    const tsIso = new Date(now).toISOString();
+    const item = JSON.stringify({ ...detail, ts: tsIso, tsNum: now, user, type });
     const ttl = { expirationTtl: 60 * 60 * 24 * 90 };
-    await env.ENGR_KV.put(`auditLatest:${rev}:${type}:${rand}`, item, ttl);
+    // §H 1단계: KV(기존, 소스 유지) + D1(audit_log, 가산) 이중쓰기. 둘 다 best-effort, 동일 id로 멱등.
+    const kvP = env.ENGR_KV.put(`auditLatest:${id}`, item, ttl);
+    const d1P = env.DB
+      ? env.DB.prepare('INSERT OR IGNORE INTO audit_log (id,ts,ts_num,user,type,detail_json) VALUES (?,?,?,?,?,?)').bind(id, tsIso, now, user, type, JSON.stringify(detail)).run()
+      : Promise.resolve();
+    await Promise.allSettled([kvP, d1P]);
   } catch (_) {}
 }
 
@@ -565,7 +568,7 @@ All outputs are review drafts for humans; never instruct automatic customer send
   //
   const fullText = `[SYSTEM]${systemPrompt}\n[USER]${clippedPrompt}`;
   const hash = await sha256Hex(mode + '|' + fullText);
-  const cacheKey = `ai:v2:${mode}:${hash.slice(0, 40)}`;
+  const cacheKey = `ai:v3:${mode}:${hash.slice(0, 40)}`;  // v3: 옛 워커가 text를 배열로 저장한 오염 캐시 무효화(callAI 비-string 방어와 함께)
 
   //
   try {
@@ -1321,6 +1324,84 @@ async function pushNotify(env, eventKey, actorId, vars){
   }catch(_){}
 }
 
+// ════════════ Phase 0 · D1 foundation (feat/hub-d1-foundation) — spec §C/§B ════════════
+// 커스텀 JQL Jira 검색 (자격증명 서버측 = mj.park 토큰, 클라 노출 0)
+async function jiraSearchJql(env, jql, fields, maxPages = 8) {
+  if (!env.JIRA_TOKEN) throw new Error('JIRA_TOKEN 미설정');
+  const headers = { 'Authorization': 'Basic ' + btoa('mj.park@escare.co.kr:' + env.JIRA_TOKEN), 'Content-Type': 'application/json', 'Accept': 'application/json' };
+  let all = [], token, pages = 0;
+  do {
+    const body = { jql, maxResults: 100, fieldsByKeys: false, fields };
+    if (token) body.nextPageToken = token;
+    const res = await fetch('https://escare-engr.atlassian.net/rest/api/3/search/jql', { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error('Jira ' + res.status + ': ' + (await res.text()).slice(0, 160));
+    const page = await res.json();
+    all = all.concat(page.issues || []);
+    token = page.nextPageToken; pages++;
+  } while (token && pages < maxPages);
+  return all;
+}
+// 브래킷 분류(§B): customer / vendorcase / unclassified / internal / none
+function extractBracket(s) { const m = /^\s*\[([^\]]+)\]/.exec(s || ''); return m ? m[1].trim() : ''; }
+const INTERNAL_TAGS = ['hands-on', 'handson', 'hands on', 'none', 'null', 'n/a', 'na', 'test', '테스트', '내부', '검토', '긴급', 'urgent', 'poc'];
+function classifyBracket(summary, custList) {
+  // L-16: 프론트 extractCustomer와 동일하게 제목 내 '모든' 브래킷을 스캔(선두 숫자 케이스번호 등 건너뜀)
+  const brackets = (String(summary || '').match(/\[([^\]]+)\]/g) || []).map(m => m.slice(1, -1).trim()).filter(Boolean);
+  if (!brackets.length) return { kind: 'none', bracket: '' };
+  for (const b of brackets) { for (const c of custList) { if (c.name === b || (c.aliases || []).includes(b)) return { kind: 'customer', bracket: b, customer: c.name }; } }  // M-5: 등록 고객사/별칭 우선
+  // 고객사 후보 = 숫자(케이스번호)·내부태그 아닌 첫 브래킷 (프론트와 일치)
+  const cand = brackets.find(b => !/^\d+$/.test(b) && !INTERNAL_TAGS.includes(b.toLowerCase()));
+  if (cand) {
+    if (/^[A-Z]{2,3}\d+$/i.test(cand) || /^hands[\s-]?on$/i.test(cand)) return { kind: 'vendorcase', bracket: cand };
+    if (/[가-힣]/.test(cand)) return { kind: 'customer', bracket: cand, customer: cand };   // 한글 = 고객사(MJ 요청)
+    return { kind: 'unclassified', bracket: cand };   // H-3: 미등록·비한글 모호 → ⚑ 검토 필요
+  }
+  const first = brackets[0];   // 전부 숫자/내부태그
+  if (INTERNAL_TAGS.includes(first.toLowerCase())) return { kind: 'internal', bracket: first };
+  return { kind: 'vendorcase', bracket: first };   // 숫자 케이스번호 등
+}
+async function getCustomersD1(env) {
+  try { const r = await env.DB.prepare('SELECT name, aliases FROM customers WHERE active=1').all(); return (r.results || []).map(c => ({ name: c.name, aliases: (() => { try { return JSON.parse(c.aliases || '[]'); } catch { return []; } })() })); }
+  catch (_) { return []; }
+}
+async function getMonitorAllowlist(env) {
+  try { const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key='monitor_allowlist'").first(); if (r && r.value) return JSON.parse(r.value); } catch (_) {}
+  return ['mj.park'];
+}
+async function isMonitorAllowed(env, user) { const list = await getMonitorAllowlist(env); return list.map(normalizeUserId).includes(normalizeUserId(user)); }
+async function getFeatureFlags(env) {
+  const def = { compat: true, history: true, monitor: true, nsis: true };
+  try { const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key='feature_flags'").first(); if (r && r.value) return { ...def, ...JSON.parse(r.value) }; } catch (_) {}
+  return def;
+}
+async function getAuditReadD1(env) {
+  try { const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key='audit_read_d1'").first(); return r?.value === 'on'; } catch (_) { return false; }
+}
+function jqlEsc(s) { return String(s).replace(/[\r\n]+/g, ' ').replace(/["\\]/g, '\\$&'); }
+function jqlTextEsc(s) { return jqlEsc(String(s).replace(/[*?~^:"]/g, ' ')); }  // L-14: text ~ 우변(Lucene) 메타문자 제거 → 비균형 와일드카드 Jira 400 방지
+function okDate(s) { s = String(s == null ? '' : s).trim(); return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : ''; }  // M-7: 날짜 형식 검증(아니면 빈값) — XSS 근원 차단 + 정렬 NaN 방지
+function nextDayStr(d) { const dt = new Date(d + 'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate() + 1); return dt.toISOString().slice(0, 10); }
+const TEAM_FIELDS = ['summary', 'status', 'assignee', 'reporter', 'labels', 'issuetype', 'created', 'updated', 'duedate', 'customfield_10134'];
+function mapJiraIssue(it, custList) {
+  const f = it.fields || {};
+  return { key: it.key, summary: f.summary || '', status: f.status?.name || '', assignee: f.assignee?.displayName || '-', labels: f.labels || [], type: f.issuetype?.subtask ? 'subtask' : 'task', created: f.created || '', updated: f.updated || '', duedate: f.duedate || '', cls: classifyBracket(f.summary, custList) };
+}
+async function buildDailySnapshot(env, day) {
+  try {
+    const jql = `project = ENGR AND updated >= "${day}" AND updated < "${nextDayStr(day)}" ORDER BY updated DESC`;
+    const issues = await jiraSearchJql(env, jql, TEAM_FIELDS, 12);
+    const custList = await getCustomersD1(env);
+    const items = issues.map(it => mapJiraIssue(it, custList));
+    const payload = { day, count: items.length, items };
+    const built_at = new Date().toISOString();
+    try { await env.DB.prepare("INSERT INTO team_daily_snapshot (day,payload_json,built_at) VALUES (?,?,?) ON CONFLICT(day) DO UPDATE SET payload_json=excluded.payload_json, built_at=excluded.built_at").bind(day, JSON.stringify(payload), built_at).run(); } catch (_) {}
+    return { ...payload, built_at };
+  } catch (e) {  // L-21: cron 스냅샷 실패가 조용히 묻히지 않게 감사 기록(관측성)
+    try { await auditLog(env, 'system', 'MON_SNAPSHOT_FAIL', { monType: 'snapshot', day, error: String((e && e.message) || e).slice(0, 200) }); } catch (_) {}
+    return { day, count: 0, items: [], error: String((e && e.message) || e) };
+  }
+}
+
 //
 export default {
   async fetch(request, env, ctx) {
@@ -1360,6 +1441,7 @@ export default {
           const cfg = await env.ENGR_KV.get('config:session_min');
           if (cfg) sessionMin = parseInt(cfg) || 120;
         } catch (_) {}
+        const mustChangePin = !(await getUserPinHash(env, sessionUser));  // H-1: 세션 복원 시에도 개인 PIN 미설정이면 강제 변경 유지
         return corsResponse({
           ok: true,
           name: sessionUser,
@@ -1369,6 +1451,7 @@ export default {
           isSuperAdmin: role === 'super',
           role,
           sessionMin,
+          mustChangePin,
         });
       }
 
@@ -1384,7 +1467,7 @@ export default {
         }
 
         let pinOk = await validateUserPin(env, userId, pin);
-        if (!pinOk && account.displayName) pinOk = await validateUserPin(env, account.displayName, pin);
+        // M-2: displayName 폴백 제거 — PIN은 항상 정규화 id로 저장되어 폴백은 dead이고, 교차계정 PIN 매칭 위험만 유발(레거시는 TEAM_PIN→H-1로 graceful)
         if (!pinOk) return corsResponse({ ok: false, message: 'PIN\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.' }, 401);
         // \uC8FC\uC758: \uB85C\uADF8\uC778 \uC2DC PIN \uC790\uB3D9 \uB36E\uC5B4\uC4F0\uAE30 \uC81C\uAC70. PIN\uC740 \uC624\uC9C1 /auth/change-pin(\uBA85\uC2DC\uC801 'PIN \uBCC0\uACBD')\uC73C\uB85C\uB9CC \uBCC0\uACBD\uB428.
 
@@ -1398,7 +1481,8 @@ export default {
         } catch (_) {}
 
         const sessionToken = await createSession(env, userId, sessionMin);
-        await auditLog(env, userId, 'LOGIN', { role });
+        const mustChangePin = !(await getUserPinHash(env, userId));  // H-1: 개인 PIN 미설정(공유 PIN 폴백 로그인) → 최초 1회 강제 변경
+        await auditLog(env, userId, 'LOGIN', { role, viaSharedPin: mustChangePin });
         return corsResponse({
           ok: true,
           name: userId,
@@ -1406,7 +1490,7 @@ export default {
           displayName: account.displayName || userId,
           isAdmin: role === 'admin' || role === 'super',
           isSuperAdmin: role === 'super',
-          role, sessionMin, sessionToken,
+          role, sessionMin, sessionToken, mustChangePin,
         });
       }
 
@@ -1475,7 +1559,9 @@ export default {
       if (path === '/ai/generate' && request.method === 'POST') {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         const body = await request.json().catch(() => ({}));
-        const { contents, mode = 'technical_analysis', detail = {} } = body;
+        const { contents, mode = 'technical_analysis' } = body;
+        let detail = (body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)) ? body.detail : {};
+        try { if (JSON.stringify(detail).length > 1000) detail = { _truncated: true }; } catch (_) { detail = {}; }  // L-31: detail 크기 캡(감사로그/D1 비대화 방지)
         const prompt = contents?.[0]?.parts?.[0]?.text;
         if (!prompt) return corsResponse({ ok: false, message: '\uD504\uB86C\uD504\uD2B8\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.' }, 400);
 
@@ -1497,7 +1583,7 @@ export default {
           const safeMode = normalizeAIMode(mode);
           const result = await callAI(env, prompt, safeMode);
           const outcome = result._cached ? 'cached' : 'success';
-          await auditLog(env, user, 'AI_CALL', { reqId, mode: safeMode, promptLen: prompt.length, outcome, model: result._model, ...detail });
+          await auditLog(env, user, 'AI_CALL', { ...detail, reqId, mode: safeMode, promptLen: prompt.length, outcome, model: result._model });  // M-9: 클라 detail을 앞에 두어 서버 계산값이 항상 우선(감사 위조 방지)
           await updateAIUsage(env, user, outcome, result._model);
           return corsResponse(result);
         } catch (e) {
@@ -1536,7 +1622,7 @@ export default {
           const vtRes = await fetch(vtUrl, { headers: H });
           const data = await vtRes.json();
           if (vtRes.ok && data?.data?.attributes) {
-            if (!body.noAudit) await auditLog(env, user, 'VT_LOOKUP', { vtType: type, value: raw.slice(0, 40), mal: data.data.attributes.last_analysis_stats?.malicious || 0 });
+            if (!body.noAudit) await auditLog(env, user, 'VT_LOOKUP', { vtType: type, value: raw.slice(0, 60), mal: data.data.attributes.last_analysis_stats?.malicious || 0 });
             if (type === 'hash') await saveVtHistory(env, user, raw.toLowerCase(), data.data.attributes);
           }
           return corsResponse({ ...data, _type: type, _value: raw }, vtRes.status);
@@ -1594,6 +1680,20 @@ export default {
         if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '\uAD00\uB9AC\uC790\uB9CC \uC811\uADFC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
         const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '50', 10) || 50));
         const filter = url.searchParams.get('filter') || '';
+        // §H 3단계: 읽기 D1 우선(app_settings audit_read_d1='on') → D1 비었으면 KV 폴백
+        if (await getAuditReadD1(env)) {
+          try {
+            const q = filter
+              ? env.DB.prepare('SELECT ts,ts_num,user,type,detail_json FROM audit_log WHERE type=? ORDER BY ts_num DESC LIMIT ?').bind(filter, limit)
+              : env.DB.prepare('SELECT ts,ts_num,user,type,detail_json FROM audit_log ORDER BY ts_num DESC LIMIT ?').bind(limit);
+            const r = await q.all();
+            const rows = r.results || [];
+            if (rows.length) {
+              const logs = rows.map(x => ({ ts: x.ts, tsNum: x.ts_num, user: x.user, type: x.type, ...(() => { try { return JSON.parse(x.detail_json || '{}'); } catch { return {}; } })() }));
+              return corsResponse(logs);
+            }
+          } catch (_) {}
+        }
         const prefix = 'auditLatest:';
         let list = await env.ENGR_KV.list({ prefix, limit });
 
@@ -1616,6 +1716,42 @@ export default {
         return corsResponse(logs);
       }
 
+      // ── §H 감사로그 KV→D1 마이그레이션 (슈퍼) ──
+      if (path === '/admin/migrate/audit-status' && request.method === 'GET') {
+        if (!hasSession || !await isSuper(env, user)) return corsResponse({ ok: false, message: '슈퍼 관리자만 가능합니다.' }, 403);
+        let d1Count = 0; try { const r = await env.DB.prepare('SELECT count(*) AS c FROM audit_log').first(); d1Count = r?.c || 0; } catch (_) {}
+        return corsResponse({ ok: true, d1Count, readD1: await getAuditReadD1(env) });
+      }
+      if (path === '/admin/migrate/audit-backfill' && request.method === 'POST') {
+        if (!hasSession || !await isSuper(env, user)) return corsResponse({ ok: false, message: '슈퍼 관리자만 가능합니다.' }, 403);
+        const body = await request.json().catch(() => ({}));
+        const prefix = body.prefix === 'audit:' ? 'audit:' : 'auditLatest:';
+        const page = await env.ENGR_KV.list({ prefix, cursor: body.cursor || undefined, limit: 100 });
+        const keys = page.keys || [];
+        const vals = await Promise.all(keys.map(k => env.ENGR_KV.get(k.name).catch(() => null)));
+        const stmts = [];
+        keys.forEach((k, i) => {
+          if (!vals[i]) return;
+          let item; try { item = JSON.parse(vals[i]); } catch { return; }
+          const id = k.name.replace(/^(auditLatest:|audit:)/, '');
+          const tsNum = item.tsNum || Date.parse(item.ts) || 0;
+          const { ts, tsNum: _t, user: u, type: ty, ...detail } = item;
+          stmts.push(env.DB.prepare('INSERT OR IGNORE INTO audit_log (id,ts,ts_num,user,type,detail_json) VALUES (?,?,?,?,?,?)').bind(id, ts || new Date(tsNum).toISOString(), tsNum, u || '', ty || '', JSON.stringify(detail)));
+        });
+        let inserted = 0;
+        if (stmts.length) { try { const res = await env.DB.batch(stmts); inserted = res.reduce((n, r) => n + (r.meta?.changes || 0), 0); } catch (e) { return corsResponse({ ok: false, message: 'D1 배치 실패: ' + e.message }, 500); } }
+        await auditLog(env, user, 'AUDIT_MIGRATE', { migPhase: 'backfill', prefix, scanned: keys.length, inserted });
+        return corsResponse({ ok: true, scanned: keys.length, inserted, cursor: page.list_complete ? null : page.cursor, done: !!page.list_complete });
+      }
+      if (path === '/admin/migrate/audit-readsource' && request.method === 'POST') {
+        if (!hasSession || !await isSuper(env, user)) return corsResponse({ ok: false, message: '슈퍼 관리자만 가능합니다.' }, 403);
+        const body = await request.json().catch(() => ({}));
+        const v = body.d1 ? 'on' : 'off';
+        try { await env.DB.prepare("INSERT INTO app_settings (key,value) VALUES ('audit_read_d1',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(v).run(); }
+        catch (e) { return corsResponse({ ok: false, message: '저장 실패: ' + e.message }, 500); }
+        await auditLog(env, user, 'AUDIT_MIGRATE', { migPhase: 'readsource', readD1: v });
+        return corsResponse({ ok: true, readD1: v === 'on' });
+      }
 
       //
       if (path === '/admin/list' && request.method === 'GET') {
@@ -1712,6 +1848,11 @@ export default {
           admins[targetId] = (newRole === 'super') ? 'super' : 'admin';
         }
 
+        // H-4: getAdmins가 config:users의 role을 우선 사용하므로, config:users도 동기화해야 강등/승급이 실제 적용됨
+        if (users[targetId]) {
+          const syncRole = action === 'remove' ? 'user' : ((newRole === 'super') ? 'super' : 'admin');
+          await saveUserAccount(env, { id: targetId, displayName: users[targetId].displayName, role: syncRole, active: users[targetId].active !== false });
+        }
         await env.ENGR_KV.put('config:admins', JSON.stringify(admins));
         await auditLog(env, user, 'ADMIN_CHANGE', { action, target: targetId, role: newRole });
         return corsResponse({ ok: true, admins });
@@ -1781,6 +1922,7 @@ export default {
         const resetPin = getDefaultResetPin(env);
         if (!resetPin) return corsResponse({ ok: false, message: 'DEFAULT_RESET_PIN is not configured.' }, 500);
         await setUserPin(env, target, resetPin);
+        await revokeUserSessions(env, target);  // L-3: PIN 리셋 시 대상의 기존 세션 무효화(재인증 강제)
         await auditLog(env, user, 'PIN_RESET', { target });
         return corsResponse({ ok: true, user: target });
       }
@@ -1828,7 +1970,7 @@ export default {
           id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
           title: body.title || '',
           url: body.url || '',
-          category: body.category || '\u6E72\uACE0?',
+          category: body.category || '\uAE30\uD0C0',
           desc: body.desc || '',
           comments: [],
           createdBy: user,
@@ -1856,24 +1998,25 @@ export default {
         }
       }
       //
-      if (path.startsWith('/links/') && request.method === 'PUT') {
+      if (/^\/links\/[^/]+$/.test(path) && request.method === 'PUT') {  // L-8: /links/{id}/comments \uD761\uC218 \uBC29\uC9C0(\uC815\uD655 \uB9E4\uCE6D)
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
-        const id = path.split('/')[2];
+        const id = decodeURIComponent(path.split('/')[2]);
         const body = await request.json().catch(() => ({}));
         const raw = await env.ENGR_KV.get('config:links');
         let links = raw ? JSON.parse(raw) : [];
         const target = links.find(l => l.id === id);
         if (!await canModifyItem(env, user, target)) return corsResponse({ ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC218\uC815\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
-        links = links.map(l => l.id === id ? { ...l, ...body, id, updatedBy: user, updatedAt: new Date().toISOString() } : l);
+        const lf = {}; ['title', 'url', 'category', 'desc'].forEach(k => { if (body[k] !== undefined) lf[k] = body[k]; });  // M-3: 허용 필드만(createdBy/createdAt/comments 보존)
+        links = links.map(l => l.id === id ? { ...l, ...lf, id, updatedBy: user, updatedAt: new Date().toISOString() } : l);
         await env.ENGR_KV.put('config:links', JSON.stringify(links));
         await auditLog(env, user, 'LINK_UPDATE', { id, title: body.title });
         return corsResponse({ ok: true });
       }
 
       //
-      if (path.startsWith('/links/') && request.method === 'DELETE') {
+      if (/^\/links\/[^/]+$/.test(path) && request.method === 'DELETE') {  // L-8: /links/{id}/comments \uD761\uC218 \uBC29\uC9C0(\uC815\uD655 \uB9E4\uCE6D)
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
-        const id = path.split('/')[2];
+        const id = decodeURIComponent(path.split('/')[2]);
         const raw = await env.ENGR_KV.get('config:links');
         let links = raw ? JSON.parse(raw) : [];
         const delLink = links.find(l => l.id === id);
@@ -1969,11 +2112,16 @@ export default {
         const list = subs[user] || [];
         if (!list.length) return corsResponse({ ok: false, message: '\uC774 \uAE30\uAE30\uC5D0\uC11C \uBA3C\uC800 \uC54C\uB9BC\uC744 \uCF1C\uC8FC\uC138\uC694.' }, 400);
         const payload = { title: '\uD83D\uDD14 \uD14C\uC2A4\uD2B8 \uC54C\uB9BC', body: '\uC54C\uB9BC\uC774 \uC815\uC0C1 \uB3D9\uC791\uD569\uB2C8\uB2E4.', page: 'mydesk', ts: Date.now(), tag: 'test' };
-        let sent = 0, gone = 0;
+        let sent = 0, gone = 0, changed = false;
         for (const s of list) {
-          try { await enqueuePending(env, s.endpoint, payload); } catch (_) {}
-          try { const st = await sendWebPush(env, s); if (st >= 200 && st < 300) sent++; else if (st === 404 || st === 410) gone++; } catch (_) {}
+          try {
+            const st = await sendWebPush(env, s);
+            if (st >= 200 && st < 300) { sent++; try { await enqueuePending(env, s.endpoint, payload); } catch (_) {} }  // L-28: 성공 시에만 pending
+            else if (st === 404 || st === 410) { gone++; subs[user] = (subs[user] || []).filter(x => x.endpoint !== s.endpoint); changed = true; }  // L-27: 만료 endpoint 제거
+          } catch (_) {}
         }
+        if (subs[user] && !subs[user].length) { delete subs[user]; changed = true; }
+        if (changed) await savePushSubs(env, subs);
         return corsResponse({ ok: true, sent, gone });
       }
       if (path === '/push/send' && request.method === 'POST') {
@@ -2125,13 +2273,14 @@ export default {
       //
       if (path.startsWith('/knowledge/') && request.method === 'PUT') {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
-        const id = path.split('/')[2];
+        const id = decodeURIComponent(path.split('/')[2]);  // L-10: \uB313\uAE00 \uB77C\uC6B0\uD2B8\uC640 \uB514\uCF54\uB529 \uD1B5\uC77C
         const body = await request.json().catch(() => ({}));
         const raw = await env.ENGR_KV.get('config:knowledge');
         let items = raw ? JSON.parse(raw) : [];
         const target = items.find(it => it.id === id);
         if (!await canModifyItem(env, user, target)) return corsResponse({ ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC218\uC815\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
-        items = items.map(it => it.id === id ? { ...it, ...body, id, updatedBy: user, updatedAt: new Date().toISOString() } : it);
+        const kf = {}; ['product', 'category', 'title', 'content', 'link'].forEach(k => { if (body[k] !== undefined) kf[k] = body[k]; });  // M-4: 허용 필드만(createdBy/createdAt/comments 보존)
+        items = items.map(it => it.id === id ? { ...it, ...kf, id, updatedBy: user, updatedAt: new Date().toISOString() } : it);
         await env.ENGR_KV.put('config:knowledge', JSON.stringify(items));
         await auditLog(env, user, 'KNOWLEDGE_UPDATE', { id, title: body.title || target?.title });
         return corsResponse({ ok: true });
@@ -2139,7 +2288,7 @@ export default {
       //
       if (path.startsWith('/knowledge/') && request.method === 'DELETE') {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
-        const id = path.split('/')[2];
+        const id = decodeURIComponent(path.split('/')[2]);  // L-10: \uB313\uAE00 \uB77C\uC6B0\uD2B8\uC640 \uB514\uCF54\uB529 \uD1B5\uC77C
         const raw = await env.ENGR_KV.get('config:knowledge');
         let items = raw ? JSON.parse(raw) : [];
         const target = items.find(it => it.id === id);
@@ -2170,8 +2319,8 @@ export default {
           siteId: body.siteId || '',
           quantity: body.quantity || '',
           serial: body.serial || '',
-          startDate: body.startDate || '',
-          expireDate: body.expireDate || '',   // End Date (지원/만료 종료일 — D-day 기준)
+          startDate: okDate(body.startDate),
+          expireDate: okDate(body.expireDate),   // End Date (지원/만료 종료일 — D-day 기준)
           memo: body.memo || '',
           createdBy: user,
           createdAt: new Date().toISOString(),
@@ -2187,6 +2336,7 @@ export default {
         const body = await request.json().catch(() => ({}));
         const items = Array.isArray(body.items) ? body.items : [];
         if (!items.length) return corsResponse({ ok: false, message: '등록할 항목이 없습니다.' }, 400);
+        if (items.length > 200) return corsResponse({ ok: false, message: '한 번에 최대 200건까지 등록할 수 있습니다.' }, 400);  // M-8: KV 비대화 방지
         const raw = await env.ENGR_KV.get('config:eos');
         let store = raw ? JSON.parse(raw) : [];
         const created = [];
@@ -2195,8 +2345,8 @@ export default {
           const it = {
             id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
             customer: b.customer || '', productDesc: b.productDesc || '', siteId: b.siteId || '',
-            quantity: b.quantity || '', serial: b.serial || '', startDate: b.startDate || '',
-            expireDate: b.expireDate || '', memo: b.memo || '', createdBy: user, createdAt: new Date().toISOString(),
+            quantity: b.quantity || '', serial: b.serial || '', startDate: okDate(b.startDate),
+            expireDate: okDate(b.expireDate), memo: b.memo || '', createdBy: user, createdAt: new Date().toISOString(),
           };
           store.push(it); created.push(it);
         }
@@ -2231,12 +2381,140 @@ export default {
         let items = raw ? JSON.parse(raw) : [];
         const target = items.find(it => it.id === id);
         if (!await canModifyItem(env, user, target)) return corsResponse({ ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC218\uC815\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
-        items = items.map(it => it.id === id ? { ...it, ...body, id, updatedBy: user, updatedAt: new Date().toISOString() } : it);
+        const ef = {}; ['customer', 'productDesc', 'siteId', 'quantity', 'serial', 'memo'].forEach(k => { if (body[k] !== undefined) ef[k] = body[k]; });  // M-3/M-7: 허용필드+날짜검증
+        if (body.startDate !== undefined) ef.startDate = okDate(body.startDate);
+        if (body.expireDate !== undefined) ef.expireDate = okDate(body.expireDate);
+        items = items.map(it => it.id === id ? { ...it, ...ef, id, updatedBy: user, updatedAt: new Date().toISOString() } : it);
         await env.ENGR_KV.put('config:eos', JSON.stringify(items));
         await auditLog(env, user, 'EOS_UPDATE', { id, customer: target?.customer, product: body.productDesc || target?.productDesc, expire: body.expireDate || target?.expireDate });
         return corsResponse({ ok: true });
       }
 
+
+      // \u2500\u2500 \u00A75 \uAE30\uB2A5 \uD1A0\uAE00 (feature_flags \u00B7 app_settings) \u2500\u2500
+      if (path === '/features' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        return corsResponse({ ok: true, flags: await getFeatureFlags(env), monAllowed: await isMonitorAllowed(env, user) });
+      }
+      if (path === '/features' && request.method === 'POST') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '\uAD00\uB9AC\uC790\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
+        const b = await request.json().catch(() => ({}));
+        const next = { ...await getFeatureFlags(env), ...(b.flags || {}) };
+        next.settings = true; next.dash = true;  // L-6: 보호 토글(설정·대시보드)은 서버에서 강제 ON — 클라 가드 의존 제거
+        try { await env.DB.prepare("INSERT INTO app_settings (key,value) VALUES ('feature_flags',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(next)).run(); }
+        catch (e) { return corsResponse({ ok: false, message: '\uC800\uC7A5 \uC2E4\uD328: ' + e.message }, 500); }
+        await auditLog(env, user, 'FEATURE_TOGGLE', { featFlags: next });
+        return corsResponse({ ok: true, flags: next });
+      }
+
+      // \u2500\u2500 \u00A71 \uD638\uD658\uC131\u00B7EOS \uB9E4\uD2B8\uB9AD\uC2A4 (compat_matrix \u00B7 D1) \u2500\u2500
+      if (path === '/compat' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        if (!(await getFeatureFlags(env)).compat) return corsResponse({ ok: false, message: '\uBE44\uD65C\uC131\uD654\uB41C \uAE30\uB2A5\uC785\uB2C8\uB2E4.' }, 403);
+        const q = (new URL(request.url).searchParams.get('q') || '').trim().toLowerCase();
+        let rows = [];
+        try { const r = await env.DB.prepare('SELECT * FROM compat_matrix ORDER BY product, product_version, os').all(); rows = r.results || []; } catch (_) {}
+        if (q) rows = rows.filter(x => [x.product, x.product_version, x.os, x.os_version, x.note, x.supported].some(v => (v || '').toLowerCase().includes(q)));
+        return corsResponse({ ok: true, items: rows });
+      }
+      if (path === '/compat' && request.method === 'POST') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '\uAD00\uB9AC\uC790\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
+        if (!(await getFeatureFlags(env)).compat) return corsResponse({ ok: false, message: '\uBE44\uD65C\uC131\uD654\uB41C \uAE30\uB2A5\uC785\uB2C8\uB2E4.' }, 403);  // L-11
+        const b = await request.json().catch(() => ({}));
+        const now = new Date().toISOString();
+        try {
+          const r = await env.DB.prepare('INSERT INTO compat_matrix (product,product_version,os,os_version,supported,eos_date,eol_date,note,source,status,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+            .bind(b.product || '', b.product_version || '', b.os || '', b.os_version || '', b.supported || '', b.eos_date || '', b.eol_date || '', b.note || '', b.source || '', 'draft', now).run();
+          await auditLog(env, user, 'MATRIX_ADD', { matrixType: 'compat', product: b.product || '', os: b.os || '' });
+          return corsResponse({ ok: true, id: r.meta?.last_row_id });
+        } catch (e) { return corsResponse({ ok: false, message: '\uC800\uC7A5 \uC2E4\uD328: ' + e.message }, 500); }
+      }
+      if (path.startsWith('/compat/') && path.endsWith('/confirm') && request.method === 'POST') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '\uAD00\uB9AC\uC790\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
+        if (!(await getFeatureFlags(env)).compat) return corsResponse({ ok: false, message: '\uBE44\uD65C\uC131\uD654\uB41C \uAE30\uB2A5\uC785\uB2C8\uB2E4.' }, 403);  // L-11
+        const id = parseInt(path.split('/')[2]) || 0;
+        if (!(id > 0)) return corsResponse({ ok: false, message: '잘못된 id 입니다.' }, 400);
+        try { await env.DB.prepare("UPDATE compat_matrix SET status='confirmed', verified_by=?, verified_at=? WHERE id=?").bind(user, new Date().toISOString(), id).run(); await auditLog(env, user, 'MATRIX_CONFIRM', { matrixType: 'compat', id }); return corsResponse({ ok: true }); }
+        catch (e) { return corsResponse({ ok: false, message: e.message }, 500); }
+      }
+      if (/^\/compat\/\d+$/.test(path) && request.method === 'PUT') {  // L-12: /compat/{id}/confirm 흡수 방지(정확 매칭)
+        if (!(await getFeatureFlags(env)).compat) return corsResponse({ ok: false, message: '비활성화된 기능입니다.' }, 403);  // L-11
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '\uAD00\uB9AC\uC790\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
+        const id = parseInt(path.split('/')[2]) || 0;
+        if (!(id > 0)) return corsResponse({ ok: false, message: '잘못된 id 입니다.' }, 400);
+        const b = await request.json().catch(() => ({}));
+        try {
+          await env.DB.prepare('UPDATE compat_matrix SET product=?,product_version=?,os=?,os_version=?,supported=?,eos_date=?,eol_date=?,note=?,source=?,updated_at=? WHERE id=?')
+            .bind(b.product || '', b.product_version || '', b.os || '', b.os_version || '', b.supported || '', b.eos_date || '', b.eol_date || '', b.note || '', b.source || '', new Date().toISOString(), id).run();
+          await auditLog(env, user, 'MATRIX_UPDATE', { matrixType: 'compat', id });
+          return corsResponse({ ok: true });
+        } catch (e) { return corsResponse({ ok: false, message: e.message }, 500); }
+      }
+      if (/^\/compat\/\d+$/.test(path) && request.method === 'DELETE') {  // L-12: /compat/{id}/confirm 흡수 방지(정확 매칭)
+        if (!(await getFeatureFlags(env)).compat) return corsResponse({ ok: false, message: '비활성화된 기능입니다.' }, 403);  // L-11
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '\uAD00\uB9AC\uC790\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
+        const id = parseInt(path.split('/')[2]) || 0;
+        if (!(id > 0)) return corsResponse({ ok: false, message: '잘못된 id 입니다.' }, 400);
+        try { await env.DB.prepare('DELETE FROM compat_matrix WHERE id=?').bind(id).run(); await auditLog(env, user, 'MATRIX_DELETE', { matrixType: 'compat', id }); return corsResponse({ ok: true }); }
+        catch (e) { return corsResponse({ ok: false, message: e.message }, 500); }
+      }
+
+      // \u2500\u2500 F2/F3 JQL \uC804\uC6A9 \uC5D4\uB4DC\uD3EC\uC778\uD2B8 (Phase 0 \uACE8\uACA9, \uB85C\uC9C1\uC740 \u00A72/\u00A73\uC5D0\uC11C \uD655\uC7A5) \u2500\u2500
+      if (path === '/team/history' && request.method === 'POST') {
+        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        if (!(await getFeatureFlags(env)).history) return corsResponse({ ok: false, message: '\uBE44\uD65C\uC131\uD654\uB41C \uAE30\uB2A5\uC785\uB2C8\uB2E4.' }, 403);
+        const body = await request.json().catch(() => ({}));
+        const df = (body.dateField === 'updated') ? 'updated' : 'created';
+        const parts = ['project = ENGR'];
+        if (/^\d{4}-\d{2}-\d{2}$/.test(body.from || '')) parts.push(`${df} >= "${body.from}"`);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(body.to || '')) parts.push(`${df} <= "${body.to} 23:59"`);
+        if (body.customer) parts.push(`text ~ "${jqlTextEsc(body.customer)}"`);  // L-14   // summary~만이면 점검 등 요약 외 위치 누락 → text(요약+설명+댓글+텍스트필드)로 포함
+        if (body.product) parts.push(`labels = "${jqlEsc(body.product)}"`);
+        if (body.status) parts.push(`status = "${jqlEsc(body.status)}"`);
+        if (body.type === 'subtask') parts.push('issuetype = "\uD558\uC704 \uC791\uC5C5"');
+        else if (body.type === 'task') parts.push('issuetype = "\uC791\uC5C5"');
+        const jql = parts.join(' AND ') + ` ORDER BY ${df} DESC`;
+        let issues; try { issues = await jiraSearchJql(env, jql, TEAM_FIELDS, 10); } catch (e) { return corsResponse({ ok: false, message: 'Jira \uC870\uD68C \uC2E4\uD328: ' + e.message }, 502); }
+        const custList = await getCustomersD1(env);
+        let items = issues.map(it => mapJiraIssue(it, custList));
+        // \uACE0\uAC1D\uC0AC \uD544\uD130\uB294 JQL(summary ~ "\uACE0\uAC1D\uC0AC")\uC774 \uC774\uBBF8 \uCC98\uB9AC. \uBE0C\uB798\uD0B7 \uC815\uBC00 \uC7AC\uD544\uD130\uB294 \uC815\uB2F9 \uC774\uC288\uB97C \uC870\uC6A9\uD788 \uB204\uB77D\uC2DC\uCF1C \uC81C\uAC70(\uBD84\uB958\uB294 cls \uBC30\uC9C0\uB85C\uB9CC \uD45C\uC2DC).
+        if (body.assignee) items = items.filter(x => x.assignee === body.assignee);   // \uB2F4\uB2F9\uC790 \uD6C4\uCC98\uB9AC(\u00A72\uC5D0\uC11C accountId \uB9E4\uD551 \uC608\uC815)
+        await auditLog(env, user, 'HIST_VIEW', { histType: 'history', count: items.length });
+        return corsResponse({ ok: true, jql, count: items.length, items });
+      }
+      if ((path === '/team/daily' || path === '/team/weekly') && request.method === 'POST') {
+        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        if (!(await getFeatureFlags(env)).monitor) return corsResponse({ ok: false, message: '\uBE44\uD65C\uC131\uD654\uB41C \uAE30\uB2A5\uC785\uB2C8\uB2E4.' }, 403);
+        const isDaily = path === '/team/daily';
+        if (!await isMonitorAllowed(env, user)) { await auditLog(env, user, 'MON_VIEW', { monType: isDaily ? 'daily' : 'weekly', denied: true }); return corsResponse({ ok: false, message: '\uC811\uADFC \uAD8C\uD55C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4(\uD300 \uBAA8\uB2C8\uD130 \uD5C8\uC6A9\uBAA9\uB85D).' }, 403); }
+        const body = await request.json().catch(() => ({}));
+        let jql, meta;
+        if (isDaily) {
+          const day = /^\d{4}-\d{2}-\d{2}$/.test(body.day || '') ? body.day : new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);  // M-6: 기본 '오늘'을 KST 기준으로(cron과 일치)
+          jql = `project = ENGR AND updated >= "${day}" AND updated < "${nextDayStr(day)}" ORDER BY updated DESC`;
+          meta = { monType: 'daily', day };
+        } else {
+          const days = Math.max(1, Math.min(31, parseInt(body.days) || 7));
+          jql = `project = ENGR AND updated >= "-${days}d" ORDER BY updated DESC`;
+          meta = { monType: 'weekly', days };
+        }
+        let issues; try { issues = await jiraSearchJql(env, jql, TEAM_FIELDS, 12); } catch (e) { return corsResponse({ ok: false, message: 'Jira \uC870\uD68C \uC2E4\uD328: ' + e.message }, 502); }
+        const custList = await getCustomersD1(env);
+        const items = issues.map(it => mapJiraIssue(it, custList));
+        await auditLog(env, user, 'MON_VIEW', { ...meta, count: items.length });
+        return corsResponse({ ok: true, ...meta, count: items.length, items });
+      }
+
+      // \u2500\u2500 \u00A73 \uD300 \uBAA8\uB2C8\uD130 \uC2A4\uB0C5\uC0F7 \uC870\uD68C (mj.park) \u2500\u2500
+      if (path === '/team/snapshot' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        if (!(await getFeatureFlags(env)).monitor) return corsResponse({ ok: false, message: '\uBE44\uD65C\uC131\uD654\uB41C \uAE30\uB2A5\uC785\uB2C8\uB2E4.' }, 403);
+        if (!await isMonitorAllowed(env, user)) { await auditLog(env, user, 'MON_VIEW', { monType: 'snapshot', denied: true }); return corsResponse({ ok: false, message: '\uC811\uADFC \uAD8C\uD55C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4(\uD300 \uBAA8\uB2C8\uD130 \uD5C8\uC6A9\uBAA9\uB85D).' }, 403); }
+        let snap = null;
+        try { const r = await env.DB.prepare('SELECT day,payload_json,built_at FROM team_daily_snapshot ORDER BY day DESC LIMIT 1').first(); if (r && r.payload_json) snap = { day: r.day, built_at: r.built_at, ...JSON.parse(r.payload_json) }; } catch (_) {}
+        await auditLog(env, user, 'MON_VIEW', { monType: 'snapshot', count: snap?.count || 0 });
+        return corsResponse({ ok: true, snapshot: snap });
+      }
 
       return corsResponse({ ok: false, message: '\uC5C6\uB294 \uACBD\uB85C\uC785\uB2C8\uB2E4.' }, 404);
     } catch (err) {
@@ -2246,6 +2524,10 @@ export default {
 
   // \u2500\u2500 Cron Scheduled Handler \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   async scheduled(event, env, ctx) {
-    // no scheduled tasks
+    // §3 일일 팀 업무 스냅샷 (08:30 KST = 23:30 UTC). KST 당일 updated 이슈 저장.
+    try {
+      const kstDay = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);
+      ctx.waitUntil(buildDailySnapshot(env, kstDay));
+    } catch (_) {}
   },
 };

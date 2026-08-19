@@ -6,8 +6,16 @@
 
 # ENGR HUB — 프로젝트 메모 (Claude 작업 가이드)
 
-ESCARE 보안기술팀 내부 통합 허브. 단일 `index.html`(약 7,800줄) + Cloudflare Worker(`worker.js`).
-현재 버전: **v1.9.0** (웹 푸시 알림)
+ESCARE 보안기술팀 내부 통합 허브. **아래 수치는 2026-08-07 실측.**
+
+- **프론트**: `index.html`(2,779줄 / 235KB, `<style>` 15블록) + `js/00~17` **18파일**.
+  `js/*.js`는 **클래식 스크립트(전역 스코프 공유)** — 예외는 `00-theme-init.js`·`12-mydesk.js`(IIFE).
+  **`index.html`의 `<script src>` 순서가 곧 의존 순서.** `<script>` 19개는 **전부 `src=`** 라 인라인 스크립트는 0개.
+- **워커**: `worker.js`(2,130줄) + `src/` 11모듈(audit auth config items jira kb kv push sales settings vt), 엔드포인트 **71개**.
+- **페이지**: dash issues cases customers owners sales eos vt nsischk links knowledge audit settings mydesk compat monitor quiz quizadmin
+현재 버전: **v2.0** · 화면 우상단/사이드바에 개발·운영 배지(html[data-env], js/00-theme-init.js)
+
+**문법 검사 CI**: `.github/workflows/syntax.yml`(push·PR마다). **검사만** 하고 배포는 안 한다 — Pages 자동 빌드는 Actions 결과와 무관하므로 차단이 아니라 알림이다.
 
 ---
 
@@ -19,10 +27,17 @@ ESCARE 보안기술팀 내부 통합 허브. 단일 `index.html`(약 7,800줄) +
 | dev | `engr-jira.github.io/engr-hub-dev` (repo `engr-hub-dev`) | `engr-hub-proxy-dev.engr-jira.workers.dev` | `C:\Users\passi\Downloads\engr-hub-dev` |
 | prod | `engr-jira.github.io/engr-hub` (repo `engr-hub`, origin `engr-jira/engr-hub.git`) | `engr-hub-proxy.engr-jira.workers.dev` | `C:\Users\passi\Downloads\engr-hub-prod` |
 
-**프론트 배포** = `git push origin main` (GitHub Pages 자동 빌드, **반영까지 1~2분** 소요).
+**프론트 배포** = `node scripts/stamp-assets.js` **먼저 실행** → `git push origin main` (GitHub Pages 자동 빌드, **반영까지 1~2분** 소요).
+  - ⚠️ Pages 는 js 를 `max-age=600` 으로 준다. 스탬프를 안 찍으면 index.html 만 새로 받고 **js 는 최대 10분간 예전 것**이 쓰여 "배포했는데 안 바뀐다"가 된다(2026-08-19 두 번 겪음).
+  - `scripts/stamp-assets.js` 가 `<script src="js/*.js?b=YYYYMMDDHHmm">` 을 갱신한다. js 를 하나라도 고쳤으면 반드시 실행.
 **워커 배포** = `npx wrangler deploy --config <경로>/wrangler.jsonc`
   - ⚠️ `--config` 플래그 필수. (그냥 `wrangler deploy` 하면 `C:\Users\passi\Application Data` 정션 EPERM으로 실패)
   - 워커 변경 시에만 배포 필요. 프론트만 바뀌면 git push만.
+
+**⚠️ 개발·운영은 같게 동작해야 한다(2026-08-19 이관 완료).** 운영이 정본, 개발은 같은 데이터로 테스트하는 곳.
+  코드·워커·cron·시크릿·app_settings·D1 데이터가 모두 동일하다. **개인 데이터만 환경별**(mydesk/userpin/push/auditLatest).
+  스케줄 분석 엔진은 **양쪽에 같은 결과를 저장**한다(읽기는 운영만, 쓰기는 둘 다 — 분석은 1회).
+  차이가 나면 안 되는 항목과 유지 절차는 .
 
 **dev → prod 동기화** (정석 순서):
 ```bash
@@ -45,11 +60,41 @@ node -e 'const fs=require("fs"),vm=require("vm");const h=fs.readFileSync("index.
 
 ---
 
+## 1.5 D1 / 신규 기능 (Phase 0 + F1~F4 + §5 + §H) — dev 적용 완료
+
+**Cloudflare D1**(SQLite) 도입. dev DB `engr-hub-dev-db`(id `b3da16b6-16ac-4181-871b-a7eca09dc046`), 바인딩 **`env.DB`**, APAC.
+- `wrangler.jsonc`에 `d1_databases`(binding DB) 추가. **워커 배포는 OAuth(wrangler login)로 OK**(바인딩은 설정값).
+- **D1 DDL/데이터 작업**은 OAuth 토큰으로 실패(error 10000) → **커스텀 API 토큰**(D1 Edit + Workers KV Storage Edit) 필요. 토큰은 코드/문서 금지·작업 후 삭제. 예: `CLOUDFLARE_API_TOKEN="$(cat <파일>)" npx wrangler d1 execute engr-hub-dev-db --remote --file d1/<x>.sql --config wrangler.jsonc`. (이번 세션 토큰은 사용 후 삭제함 — 추후 D1 작업 시 MJ가 재발급/공유)
+- **테이블**(`d1/schema.sql`·`seed.sql`·`audit.sql`): `compat_matrix` / `customers`(name·aliases·active, 14곳 시드) / `app_settings`(key·value) / `team_daily_snapshot` / `audit_log`(§H).
+- **app_settings 키**: `monitor_allowlist`(["mj.park"]) · `monitor_daily_time`(08:30) · `feature_flags`(JSON) · `audit_read_d1`(on/off, dev=on).
+
+**⚠️ 운영(prod) 동기화 시 필수**: prod 워커도 `env.DB` 호출 → dev worker.js를 prod로 복사하기 **전에 prod 전용 D1 DB 생성 + prod `wrangler.jsonc`에 d1_databases 바인딩 + schema/seed 적용**이 선행돼야 함. (D1 코드는 대부분 try/catch·`env.DB?` 가드라 크래시는 안 나지만 compat 저장 실패·고객사 분류 degrade.) **운영 D1 도입·마이그레이션은 MJ 명시 요청 시에만.**
+
+**신규 기능**(전부 dev 배포 완료):
+- **§1 호환성 매트릭스**(`/compat` CRUD+`/confirm`, nav-compat, page-compat, AI mode `cmpx`): D1 compat_matrix. 조회=세션, 변경·확정=관리자. confirmed=공식(✓)·draft=초안. 감사 `MATRIX_ADD/UPDATE/CONFIRM/DELETE`(**matrixType** 키).
+- **§2 고객사 업무 이력**(`/team/history`): 고객사 페이지 필터바 '📜 업무 이력' 모달 → Jira 직접 JQL(기간/제품/유형/담당/상태). 분류배지(classifyBracket cls). 감사 `HIST_VIEW`(**histType**).
+- **§3 팀 업무 모니터**(`/team/daily`·`/weekly`·`/snapshot`, **mj.park allowlist** 서버 enforced): 대시보드 카드(mj.park만). **Cron `0,30 * * * *`(30분마다 기상)** → `scheduled()`가 KST 시각과 `app_settings.digest_schedule`을 보고 자기 차례만 실행. 하루 1회 보장은 `claimDailyOnce` 날짜 마커(`cron_daily_last`/`digest_last_sent`). 08:30 KST에 `buildDailySnapshot` → team_daily_snapshot. 미분류⚑는 플래그만(자동추가 안 함). 감사 `MON_VIEW`(**monType**).
+- **§5 기능 토글**(`/features` GET/POST, app_settings feature_flags): 관리자설정 '🧩 기능 토글'(admin-section np). off→nav 숨김(`applyFeatureFlags`)+서버 403. **토글 목록은 DOM의 `.sb-btn[id^="nav-"]`에서 생성**(`getMenuToggleList`) + `FEATURE_SPECIAL`(history·digest). 현재 nav 버튼 7개=dash customers issues sales vt links audit, `FEATURE_PROTECTED={settings,dash}`는 락아웃 방지로 토글 불가.
+  **서버 게이트가 실재하는 플래그는 compat·history·monitor·digest 4개뿐**(worker/src 기준). ⚠️ compat·monitor는 nav 버튼이 없어져 토글 UI에 안 뜨는데 서버 게이트는 살아 있음 — 현재 둘 다 true라 무해하나 정합 어긋남. `/features`가 `monAllowed`도 반환(§3 카드 노출). 감사 `FEATURE_TOGGLE`(**featFlags**). ※ 전-메뉴 토글로 확장됨. D1 저장값의 고아 키 `nsis`·`log`는 2026-08-07 제거. 남은 고아: mydesk cases eos knowledge more-mobile(전부 true라 무해).
+- **§I UI 문구 정합**: 잔여 'EOS'→'라이선스' 10곳(내부키·감사type·§1의 정당한 EOS·EOL 보존). normalizeAdminSettingsUI가 덮는 부제/라벨은 **JS배열+HTML 둘 다** 수정.
+- **§H 감사로그 KV→D1**: `auditLog`가 KV(`auditLatest:` 유지)+D1(`audit_log`) **이중쓰기**(Promise.allSettled, id=KV키접미사로 멱등). `/kv/audit`는 `audit_read_d1='on'`이면 **D1 우선→KV 폴백**. 슈퍼 엔드포인트 `/admin/migrate/audit-{status,backfill,readsource}` + 관리자설정 '감사로그 D1 이전'(슈퍼, IS_SUPER 가드). 감사 `AUDIT_MIGRATE`(**migPhase**). **dev=read D1 컷오버 완료**(dev KV 0건이라 백필 불필요). 이중쓰기는 grace로 상시 유지(롤백 가능). **운영 미반영.**
+
+**이 세션 배포 방식**: 사용자 지시("DEV 배포까지 쭉")로 **dev `main` 직접 배포**(기능별 브랜치 생략, `feat/hub-d1-foundation`만 병합 후 이후 main). **prod 전부 미반영.** 실기 검증=MJ.
+
+---
+
 ## 2. 코드 함정 (꼭 기억)
 
-- **중복 함수 정의 다수**: 같은 이름 함수가 여러 번 정의됨 → **마지막 정의가 적용**(hoisting). 반드시 *활성(마지막)* 정의를 수정. 예: `renderTopbarStatus` = `renderTopbarStatusV159`(마지막).
+- **중복 함수는 대부분 해소됨**(모듈 분리 + 2026-08-07 정리). 현재 상태:
+  · 교차 파일 동명 함수는 `12-mydesk.js`(IIFE) 뿐이라 무해 — toast/renderLinks/renderCases/fmtDate/escapeHtml
+  · **최상위 `const`/`let` 이름 충돌 0건.** 클래식 스크립트끼리 동명 최상위 `const`는 **SyntaxError**라 신규 추가 시 주의
+  · `renderCustomerRight`/`renderVTHistory`/`issueRowHTML` 중복은 해소됨
+  · **유지 필수 별칭 1건**: `js/09-render-topbar.js`의 `renderTopbarStatus=renderTopbarStatusV159;` — 호출부 4곳이 이 별칭에 의존
 - **My Desk JS는 IIFE 스코프**: `init/applyLayout/COLS/saveLayout/setMyDeskCols` 등은 `window`에 없음. 인라인 `onclick`에서 쓰려면 `window.fn=fn`으로 노출 필요. (단, `resetMyDesk`는 메인 스크립트에 있어 전역)
-- **⚠️ `normalizeAdminSettingsUI()` 함정**: 관리자 설정의 `.admin-section` summary/`.admin-card h3`/`.admin-card.soft`를 **DOM 순서(index) 기준으로 덮어씀**. 설정 페이지에 새 섹션/카드 추가 시 인덱스가 밀려 라벨이 깨짐. **새 섹션은 반드시 `class="admin-section np"`** 부여(정규화 셀렉터가 `:not(.np)`로 제외). 푸시 섹션이 이 방식으로 보호됨.
+- **관리자 설정 구조(2026-08-19 개편)**: 아코디언 **5개**(운영 기본값 / 기능 / 알림 / 사용자 / 데이터). 전부 `.admin-section.np`이고 각 `<details>` 안은 `<div class="admin-cards">`로 카드를 감싼다. `#page-settings .admin-grid`가 접힌 섹션을 2열로 늘어놓고, 펼친 섹션만 `grid-column:1/-1`로 전폭 + 내부 카드 2열이 된다(≥1101px).
+  - ~~`normalizeAdminSettingsUI()`~~ **제거됨**. 이전엔 summary/h3/버튼 문구를 DOM 순서(index)로 덮어써서 섹션을 추가하면 라벨이 밀려 깨졌다. 이제 문구는 마크업이 유일한 소스다 — **JS로 라벨을 다시 덮지 말 것.**
+  - 설정 페이지엔 `.sec-title`이 없다(상단 페이지 헤더와 중복이라 삭제).
+  - PIN 초기화는 사용자 목록 행 버튼(`resetUserPin(id)`)이다. 별도 섹션·`#pin-reset-user` 셀렉트는 없다.
 - **⚠️ `auditLog(env,user,type,detail)` 함정**: 저장 시 `{...user, type, ...detail}`라 **detail에 `type` 키가 있으면 액션 type을 덮어씀**(감사로그 뱃지/필터 깨짐). detail엔 `type` 대신 `vtType`/`itemType` 등 다른 키 사용. (과거 VT가 `type:'hash'`로 덮어써 'hash' 뱃지로 보이던 버그 수정함)
 - **My Desk @scope**: `@scope (#page-mydesk){...}` + 별도 `--serif/--sans/--gold` 등 자체 변수. 라이트모드는 `#mydesk-light` 스타일에서 스코프 변수 재정의.
 - **My Desk 저장**: 서버 KV `mydesk:<user>` ↔ `/mydesk` GET/PUT. 클라 헬퍼 `load/save/saveNow`, `window.__MD_STORE` 캐시. 카드순서=`layout3`, 숨김=`hidden`, 열수=`mdCols`.
@@ -59,8 +104,9 @@ node -e 'const fs=require("fs"),vm=require("vm");const h=fs.readFileSync("index.
 
 ## 3. 테마 / 모바일 / PWA
 
-- **테마**: `html[data-theme="light|dark"]`. `applyTheme()`가 적용·저장(`engr_theme`). CSS 변수 기반.
-- **모바일(≤700px)은 다크 전용 강제**: `applyTheme`/초기 스크립트가 모바일이면 `data-theme=dark` 강제(라이트 누수로 글자 안보임 방지). 사용자 설정값은 보존되어 데스크톱엔 적용.
+- **⚠️ v2 웜 리테마(STEP 7, 2026-07-24)**: 팔레트 전면 교체 — **라이트=살구 페이퍼(#FAF1E6)가 기본**, 다크=웜 차콜(#211D22) 옵션. 토큰 이름은 그대로(--accent=코랄 #D9603B/dark #EF8354, --success=제이드, --cyan=웜블루, --warn=앰버, --danger=웜레드). 하드코딩색은 명도보존 웜 치환됨(쿨 잔재 0). **새 색 추가 시 반드시 `var(--토큰)` 사용**(하드코딩 네이비/인디고/민트 금지). 데스크톱 기본 라이트(00-theme-init·01-core UI_THEME 기본 light), 모바일은 여전히 다크(웜 차콜)로 강제.
+- **테마**: `html[data-theme="light|dark"]`. `applyTheme()`가 적용·저장(`engr_theme`). CSS 변수 기반. **`:root`=다크(웜차콜) 기본값, `html[data-theme=light]`=페이퍼 오버라이드**(라이트 오버라이드 기계가 컴포넌트별로 촘촘 — 사이드바도 라이트=페이퍼).
+- **모바일(≤700px)은 다크(웜 차콜) 강제**: `applyTheme`/초기 스크립트가 모바일이면 `data-theme=dark` 강제. `#codex-mobile-dark` 시트가 웜차콜 `:root !important`. (라이트 모바일 시트 `#v158-style`는 미완성 — 라이트 모바일 원하면 device 검증 후 별도 작업.)
   - 모바일 스타일: 정적 `#codex-mobile-dark`(다크, head 끝으로 re-append) + `#v158-style`(원래 라이트 모바일, 미완성). 둘 다 무가드 @media라 충돌했었음 → 다크 강제로 해결.
 - **상단바**: 데스크톱 = 큰 시계(날짜+시간 한 줄) + 사용자 드롭다운 메뉴(Jira상태/동기화/새로고침/매뉴얼/앱설치/테마/PIN변경/로그아웃). 모바일 = 시계 숨김, 메뉴 버튼만(팝오버는 버튼 기준 fixed 배치).
 - **헤더 하단 구분선**: 사이드바·상단바 개별 border 제거하고 `#app::before/::after` 단일 오버레이(top:58px)로 그림 → 줌/DPI 단차 방지.
@@ -70,10 +116,10 @@ node -e 'const fs=require("fs"),vm=require("vm");const h=fs.readFileSync("index.
 
 ## 4. 기능/연동 현황
 
-- **AI**: worker `callAI` → 1순위 Gemini(`GEMINI_API_KEY`/`GEMINI_KEY`, `gemini-2.5-flash`, **thinking 비활성+maxOutputTokens 8192**, 잘림 방지), 실패 시 Cloudflare Workers AI Llama(`@cf/meta/llama-3.3-70b...`). 응답 캐시 `ai:v2:<mode>:<hash>` 7일.
+- **AI**: worker `callAI` → 1순위 Gemini(`GEMINI_API_KEY`/`GEMINI_KEY`, `gemini-2.5-flash`, **thinking 비활성+maxOutputTokens 8192**, 잘림 방지), 실패 시 Cloudflare Workers AI Llama(`@cf/meta/llama-3.3-70b...`). 응답 캐시 `ai:v3:<mode>:<hash>` 7일(v2는 text가 배열로 저장된 오염 캐시 — v3로 무효화). `callAI`는 응답 text가 비-string이면 `JSON.stringify`로 강제.
 - **VT**: `/vt/lookup`(value+type 자동인식: hash/ip/domain/url), `/vt/file`(파일 업로드 ≤32MB), `/vt/analysis`(폴링). 키 `VT_KEY`/`VT_API_KEY`.
 - **Jira**: 워커 프록시. 커스텀필드 — 고객사 `customfield_10134`(array), 구분 `_10178`, 범주 `_10036.value`, 평가 `_10244.value`, 시작일 `_10015`, 기한 `duedate`. 미기입(meta) 점검 시 `[Hands-on]` 제외. 고객사 None/비-고객사 태그는 `isRealCust`/`NON_CUST_TAGS`로 필터.
-- **로그 분석**: 업로드 ≤20MB, 붙여넣기/글자수/Ctrl+Enter, 결과는 AI 모달(📋 복사).
+- ~~로그 분석~~: **제거됨**(페이지·CSS·pageTitles 전부 정리, 2026-08-07). 워커 AI mode `logx`도 없음.
 - **매뉴얼**: 관리자=`manual.html`(full), 일반=`manual-user.html`. (별도 폴더 `engr-hub-manual`에서 `build-manual.js`로 스크린샷 base64 내장 빌드)
 - **권한**: `window.__HUB_IS_ADMIN`. 팀 일보고/감사로그/관리자설정 = 관리자/슈퍼만. 슈퍼 = mj.park(박민준).
 - **Teams 임베드**: iframe 불가(MS가 X-Frame 차단). 딥링크 버튼만 가능. Graph API 연동은 Azure AD 앱+관리자 승인 필요.
@@ -87,6 +133,28 @@ node -e 'const fs=require("fs"),vm=require("vm");const h=fs.readFileSync("index.
   - **이벤트 추가법**: 워커 `PUSH_EVENTS`에 키 추가 + 해당 POST 핸들러에 `ctx.waitUntil(pushNotify(...))` 한 줄. 관리자 UI/타겟팅은 자동 반영. (케이스 트래커는 My Desk 개인데이터라 공유 이벤트 불가)
 
 ---
+
+## 4.5 CSS 계층 (2026-08-07 실측)
+
+`index.html`에 `<style>` **15블록**, `!important` **1,011개**. 적용 순서 = 기본→v153→v154→v155→v158→polish→codex-mobile-dark→theme-style→light-fix→mydesk-scoped→mydesk-light→polish-v18→페이지별 3블록.
+
+`!important` 최다: **codex-mobile-dark 383 / v158-style 280 / theme-style 111 / v155-style 100**.
+
+- ⚠️ **v158-style(미완성 라이트 모바일)과 codex-mobile-dark(다크 강제)가 가드 없는 `@media`에서 충돌 중.** v158 셀렉터 83개 중 **42개는 codex가 덮지 않는다**(header, .top-*, .filter-row, .modal-card, .cfg-* 등) → v158 블록 삭제는 **실기기 확인 전까지 금지**.
+- ✅ **중복 인젝터 제거 완료(2026-08-07)**. v154/v155/v158은 이전까지 정적 블록과 JS 인젝터에 이중 존재했고, 인젝터는 id 가드로 항상 early-return 하는 dead 코드였다. 게다가 **사본 내용이 이미 갈라져 있어**(v155 18,667 vs 15,385 / v158 11,160 vs 9,663) 잘못된 옛 CSS를 담은 함정이었다 → 인젝터 정의 3개와 호출부 5곳 제거(−241줄). **이제 이 세 시트는 index.html 정적 블록이 유일한 소스.**
+- ⚠️ **신규 CSS는 버전 시트를 새로 만들지 말고** 페이지 스코프(`@scope`) 또는 기존 페이지별 블록에 추가.
+
+## 4.6 감사로그 이중쓰기 종료 조건
+
+dev는 read D1 컷오버 완료(`audit_read_d1='on'` 실측 확인). 이중쓰기는 grace로 유지 중이며 **KV 쓰기가 롤백 경로**다. **종료 기한 미설정 — MJ 확인 필요.**
+
+## 4.7 보류 판단 대기 (2026-08-07 조사, 결론 없음)
+
+- **manual*.html 저장소 밖 이전**: 참조는 `js/09-render-topbar.js`의 상대경로 앵커 **1곳**뿐. 두 파일 합 **4.2MB**로 저장소 용량 1·2위. 세션/localStorage 참조 여부는 미확인.
+- **CDN 3종**: **JSZip은 사용처 0건이라 로드 태그를 제거함(2026-08-07)**. Sortable은 `if(!window.Sortable) return;` 가드 있음 → 실패 시 **My Desk 카드 드래그 정렬만** 죽는다. Pretendard는 폰트라 대체 표시. **사내망 도달 여부는 미확인**(이 환경에서 curl 불가).
+- **quiz 존치**: 주간 보안 퀴즈(XP·레벨·뱃지·주간/월간 리더보드). 엔드포인트 10개, D1 3테이블(quiz_question/week/answer). P1-a~d 5커밋으로 구축.
+- **KV 쓰기 압력**: 일일 사용률은 대시보드 권한이 필요해 **확인 불가**. 정적 근거 — 배열 전체 재기록 키: config:links 5 / config:eos 4 / config:admins 4 / config:knowledge 3 / config:users 3.
+- **잔여 죽은 CSS**: `.log-textarea`가 엘리먼트 사용 0건이나 divergent 블록 10곳에 얽혀 있어 이번 정리에서 제외.
 
 ## 5. 검증/제약
 

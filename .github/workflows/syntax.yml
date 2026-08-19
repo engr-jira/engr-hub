@@ -1,0 +1,20 @@
+# 문법 검사 전용. 배포는 하지 않는다.
+# GitHub Pages 자동 빌드는 이 워크플로 결과와 무관하게 진행되므로 차단이 아니라 알림이다.
+name: syntax
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 문법 검사 (ESM 워커 + 프론트)
+        run: node .github/scripts/check-syntax.js

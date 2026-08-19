@@ -1,1408 +1,485 @@
-﻿// ENGR HUB Cloudflare Worker v1.5.11
+// ENGR HUB Cloudflare Worker v1.5.11
 //
 //
 //
-const ALLOWED_ORIGINS = [
-  'https://engr-jira.github.io',
-  'https://engr-jira.github.io/engr-hub',
-  'https://engr-jira.github.io/engr-hub-dev',
-];
 
-function getCorsHeaders(request) {
-  const origin = request?.headers?.get('Origin') || '';
-  const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
-  return {
-    'Access-Control-Allow-Origin': allowed,
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User, X-Session-Token',
-    'Vary': 'Origin',
-  };
-}
+import { CORS_HEADERS, SUPER_ADMIN, TEAM_FIELDS, corsResponse, decUser, getCorsHeaders } from './src/config.js';
+import { PUSH_EVENTS, endpointHash, enqueuePending, getPushSettings, getPushSubs, pushNotify, savePushSubs, sendWebPush } from './src/push.js';
+import { addCollectionComment, canModifyItem, deleteCollectionComment } from './src/items.js';
+import { auditLog, cleanupOldAudit, getAuditReadD1 } from './src/audit.js';
+import { buildDailySnapshot, getCustomersD1, handleJiraSearch, isMonitorAllowed, jiraSearchJql, jqlEsc, jqlTextEsc, mapJiraIssue, nextDayStr, okDate } from './src/jira.js';
+import { KV_CONFLICT_RESPONSE, buildHubBackup, getStorageStats, kvMutateArray, kvMutateJson, resetHubData } from './src/kv.js';
+import { createSession, deactivateUserAccount, getAdmins, getDefaultResetPin, getSessionUser, getTeamNames, getUserAccount, getUserPinHash, getUsers, isAdmin, isSalesRole, isSuper, normalizeUserId, purgeUserAccount, revokeUserSessions, salesPathAllowed, saveUserAccount, setUserPin, validateUserPin } from './src/auth.js';
+import { getFeatureFlags } from './src/settings.js';
+import { getVtHistory, saveVtHistory, vtDetectType, vtPollAnalysis, vtUrlId } from './src/vt.js';
+import { importRecentKBLinks } from './src/kb.js';
+import { buildSalesOverview, saveSalesNote, getSalesStaleDays } from './src/sales.js';
 
-// Legacy static headers (OPTIONS preflight 전용)
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': 'https://engr-jira.github.io',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User, X-Session-Token',
-};
-
-const SUPER_ADMIN = 'mj.park';
-const DEFAULT_USERS = [
-  { id: 'mj.park', displayName: '\uBC15\uBBFC\uC900', role: 'super', active: true },
-  { id: 'hs.lee', displayName: '\uC774\uD6A8\uC131', role: 'user', active: true },
-  { id: 'mj.kim', displayName: '\uAE40\uBBFC\uC9C0', role: 'user', active: true },
-  { id: 'kt.chae', displayName: '\uCC44\uAE30\uD0DC', role: 'admin', active: true },
-  { id: 'sh.lee', displayName: '\uC774\uC11C\uD604', role: 'user', active: true },
-  { id: 'so.choi', displayName: '\uCD5C\uC2DC\uC628', role: 'user', active: true },
-  { id: 'jp.park', displayName: '\uBC15\uC9C4\uD45C', role: 'user', active: true },
-  { id: 'yr.park', displayName: '\uBC15\uC608\uB9BC', role: 'user', active: true },
-];
-const DEFAULT_KV_STORAGE_LIMIT_BYTES = 1024 * 1024 * 1024; // Cloudflare Workers KV default 1GB basis
-
-function corsResponse(body, status = 200, request = null) {
-  const headers = request ? getCorsHeaders(request) : CORS_HEADERS;
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...headers, 'Content-Type': 'application/json; charset=utf-8' },
-  });
-}
-
-function decUser(encoded) {
-  if (!encoded) return '';
-  try {
-    const binStr = atob(encoded);
-    const bytes = new Uint8Array(binStr.length);
-    for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
-    return new TextDecoder('utf-8').decode(bytes);
-  } catch { return encoded; }
-}
-
-function normalizeUserId(id = '') {
-  return String(id || '').trim().toLowerCase();
-}
-
-async function sha256Hex(text) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-async function createSession(env, user, minutes = 120) {
-  const token = crypto.randomUUID() + '.' + crypto.randomUUID();
-  const hash = await sha256Hex(token);
-  const ttl = Math.max(5, Math.min(1440, parseInt(minutes, 10) || 120)) * 60;
-  await env.ENGR_KV.put(`session:${hash}`, JSON.stringify({ user, createdAt: new Date().toISOString() }), { expirationTtl: ttl });
-  return token;
-}
-
-async function revokeUserSessions(env, user) {
-  const id = normalizeUserId(user);
-  if (!id) return;
-  await env.ENGR_KV.put(`session:revokedBefore:${id}`, new Date().toISOString(), { expirationTtl: 60 * 60 * 48 });
-}
-
-async function getSessionUser(env, token) {
-  if (!token) return '';
-  try {
-    const hash = await sha256Hex(token);
-    const raw = await env.ENGR_KV.get(`session:${hash}`);
-    if (!raw) return '';
-    const session = JSON.parse(raw);
-    const user = normalizeUserId(session.user || '');
-    if (!user) return '';
-    const revokedBefore = await env.ENGR_KV.get(`session:revokedBefore:${user}`);
-    if (revokedBefore) {
-      const createdAt = Date.parse(session.createdAt || 0);
-      const revokedAt = Date.parse(revokedBefore);
-      if (Number.isFinite(createdAt) && Number.isFinite(revokedAt) && createdAt <= revokedAt) return '';
-    }
-    return user;
-  } catch (_) {
-    return '';
-  }
-}
-
-function defaultUserMap() {
-  return Object.fromEntries(DEFAULT_USERS.map(u => [u.id, { ...u }]));
-}
-
-async function getUsers(env) {
-  let users = defaultUserMap();
-  try {
-    const raw = await env.ENGR_KV.get('config:users');
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      const list = Array.isArray(parsed) ? parsed : Object.entries(parsed).map(([id, value]) => ({ id, ...(typeof value === 'object' ? value : { role: value }) }));
-      for (const item of list) {
-        const id = normalizeUserId(item.id || item.userId);
-        if (!id) continue;
-        users[id] = {
-          id,
-          displayName: item.displayName || item.name || id,
-          role: ['super', 'admin', 'user'].includes(item.role) ? item.role : 'user',
-          active: item.active !== false,
-        };
-      }
-    }
-  } catch (_) {}
-
-  try {
-    const admins = await getAdmins(env, { skipUsers: true });
-    for (const [idRaw, role] of Object.entries(admins)) {
-      const id = normalizeUserId(idRaw);
-      if (!id) continue;
-      users[id] = users[id] || { id, displayName: id, role: 'user', active: true };
-      users[id].role = role === 'super' ? 'super' : 'admin';
-    }
-  } catch (_) {}
-
-  users[SUPER_ADMIN] = users[SUPER_ADMIN] || { id: SUPER_ADMIN, displayName: 'mj.park', role: 'super', active: true };
-  users[SUPER_ADMIN].role = 'super';
-  users[SUPER_ADMIN].active = true;
-  return users;
-}
-
-async function getUserAccount(env, id) {
-  const users = await getUsers(env);
-  return users[normalizeUserId(id)] || null;
-}
-async function saveUserAccount(env, account) {
-  const id = normalizeUserId(account.id || account.userId);
-  if (!id || !/^[a-z0-9._-]{2,40}$/.test(id)) {
-    throw new Error('\uACC4\uC815 ID\uB294 \uC601\uBB38/\uC22B\uC790/\uC810/\uD558\uC774\uD508/\uC5B8\uB354\uBC14\uB9CC \uD5C8\uC6A9\uB429\uB2C8\uB2E4.');
-  }
-  const users = await getUsers(env);
-  users[id] = {
-    id,
-    displayName: String(account.displayName || account.name || id).trim(),
-    role: ['super', 'admin', 'user'].includes(account.role) ? account.role : 'user',
-    active: account.active !== false,
-  };
-  users[SUPER_ADMIN] = users[SUPER_ADMIN] || { id: SUPER_ADMIN, displayName: 'mj.park', role: 'super', active: true };
-  users[SUPER_ADMIN].role = 'super';
-  users[SUPER_ADMIN].active = true;
-  await env.ENGR_KV.put('config:users', JSON.stringify(Object.values(users)));
-  return users[id];
-}
-async function deactivateUserAccount(env, idRaw) {
-  const id = normalizeUserId(idRaw);
-  if (!id) throw new Error('\uB300\uC0C1 \uC0AC\uC6A9\uC790\uB97C \uC120\uD0DD\uD558\uC138\uC694.');
-  if (id === SUPER_ADMIN) throw new Error('\uCD5C\uACE0 \uAD00\uB9AC\uC790\uB294 \uBE44\uD65C\uC131\uD654\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.');
-  const users = await getUsers(env);
-  const account = users[id];
-  if (!account) return null;
-  users[id] = { ...account, active: false };
-  users[SUPER_ADMIN] = users[SUPER_ADMIN] || { id: SUPER_ADMIN, displayName: 'mj.park', role: 'super', active: true };
-  users[SUPER_ADMIN].role = 'super';
-  users[SUPER_ADMIN].active = true;
-  await env.ENGR_KV.put('config:users', JSON.stringify(Object.values(users)));
-
-  const admins = await getAdmins(env, { skipUsers: true });
-  delete admins[id];
-  admins[SUPER_ADMIN] = 'super';
-  await env.ENGR_KV.put('config:admins', JSON.stringify(admins));
-  await revokeUserSessions(env, id);
-  return users[id];
-}
-
-async function purgeUserAccount(env, idRaw) {
-  const id = normalizeUserId(idRaw);
-  if (!id) throw new Error('대상 사용자를 선택하세요.');
-  if (id === SUPER_ADMIN) throw new Error('최고 관리자는 삭제할 수 없습니다.');
-  const users = await getUsers(env);
-  if (!users[id]) throw new Error('등록된 계정이 아닙니다.');
-  delete users[id];
-  users[SUPER_ADMIN] = users[SUPER_ADMIN] || { id: SUPER_ADMIN, displayName: 'mj.park', role: 'super', active: true };
-  users[SUPER_ADMIN].role = 'super';
-  users[SUPER_ADMIN].active = true;
-  await env.ENGR_KV.put('config:users', JSON.stringify(Object.values(users)));
-  const admins = await getAdmins(env, { skipUsers: true });
-  delete admins[id];
-  admins[SUPER_ADMIN] = 'super';
-  await env.ENGR_KV.put('config:admins', JSON.stringify(admins));
-  try { await env.ENGR_KV.delete(`userpin:${id}`); } catch (_) {}
-  await revokeUserSessions(env, id);
-  return id;
-}
-
-// Team ID validation
-function getTeamNames(env) {
-  const raw = env.TEAM_NAMES || '';
-  const ids = raw.split(',').map(s => normalizeUserId(s)).filter(Boolean);
-  return [...new Set([...DEFAULT_USERS.map(u => u.id), ...ids])];
-}
-function getDefaultResetPin(env) {
-  return env.DEFAULT_RESET_PIN || '';
-}
-
-function normalizeAIMode(mode = '') {
-  const aliases = {
-    analyze: 'technical_analysis',
-    reply: 'reply_draft',
-    similar: 'similar_issues',
-  };
-  return aliases[mode] || mode || 'technical_analysis';
-}
-
-function redactSensitiveText(text = '') {
-  return String(text)
-    .replace(/(authorization\s*[:=]\s*)(bearer\s+)?[^\s"'<>]+/gi, '$1[REDACTED]')
-    .replace(/(cookie\s*[:=]\s*)[^\n\r]+/gi, '$1[REDACTED]')
-    .replace(/((api[_-]?key|token|secret|password|passwd|pin)\s*[:=]\s*)[^\s"'<>]+/gi, '$1[REDACTED]')
-    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP_REDACTED]')
-    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[EMAIL_REDACTED]');
-}
-
-function isValidVtHash(hash = '') {
-  return /^(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/i.test(String(hash).trim());
-}
-function vtDetectType(v = '') {
-  const s = String(v).trim();
-  if (isValidVtHash(s)) return 'hash';
-  if (/^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/.test(s) || /^[0-9a-f:]+:[0-9a-f:]+$/i.test(s)) return 'ip';  // L-23: IPv4 옥텟 0-255 검증
-  if (/^https?:\/\//i.test(s) || s.includes('/')) return 'url';
-  if (/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(s)) return 'domain';
-  return '';
-}
-function vtUrlId(u) { // base64url(url) without padding — VirusTotal URL identifier
-  return btoa(unescape(encodeURIComponent(u))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-async function vtPollAnalysis(vtKey, id, tries = 6) {
-  for (let i = 0; i < tries; i++) {
-    const r = await fetch(`https://www.virustotal.com/api/v3/analyses/${id}`, { headers: { 'x-apikey': vtKey } });
-    const d = await r.json();
-    const status = d?.data?.attributes?.status;
-    if (status === 'completed') return d;
-    await new Promise(res => setTimeout(res, 1500));
-  }
-  return null;
-}
-
-async function canModifyItem(env, user, item) {
-  if (!user || !item) return false;
-  if (await isAdmin(env, user)) return true;
-  return item.createdBy === user;
-}
-function cleanCommentText(text = '') {
-  return String(text || '').trim().slice(0, 2000);
-}
-async function addCollectionComment(env, key, id, user, text, auditType) {
-  const body = cleanCommentText(text);
-  if (!body) return { status: 400, body: { ok: false, message: '\uB313\uAE00 \uB0B4\uC6A9\uC744 \uC785\uB825\uD558\uC138\uC694.' } };
-  const raw = await env.ENGR_KV.get(key);
-  const items = raw ? JSON.parse(raw) : [];
-  const target = items.find(item => item.id === id);
-  if (!target) return { status: 404, body: { ok: false, message: '\uB300\uC0C1\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.' } };
-  const now = new Date().toISOString();
-  const comment = {
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    text: body,
-    createdBy: user,
-    createdAt: now,
-  };
-  target.comments = Array.isArray(target.comments) ? target.comments : [];
-  target.comments.push(comment);
-  if (target.comments.length > 100) target.comments = target.comments.slice(-100);
-  target.updatedAt = now;
-  await env.ENGR_KV.put(key, JSON.stringify(items));
-  await auditLog(env, user, auditType, { id, commentId: comment.id });
-  return { status: 200, body: { ok: true, comment }, item: target };
-}
-async function deleteCollectionComment(env, key, id, commentId, user, auditType) {
-  const raw = await env.ENGR_KV.get(key);
-  const items = raw ? JSON.parse(raw) : [];
-  const target = items.find(item => item.id === id);
-  if (!target) return { status: 404, body: { ok: false, message: '\uB300\uC0C1\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.' } };
-  const comments = Array.isArray(target.comments) ? target.comments : [];
-  const comment = comments.find(c => c.id === commentId);
-  if (!comment) return { status: 404, body: { ok: false, message: '\uB313\uAE00\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.' } };
-  if (!await isAdmin(env, user) && comment.createdBy !== user) {
-    return { status: 403, body: { ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC0AD\uC81C\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' } };
-  }
-  target.comments = comments.filter(c => c.id !== commentId);
-  target.updatedAt = new Date().toISOString();
-  await env.ENGR_KV.put(key, JSON.stringify(items));
-  await auditLog(env, user, auditType, { id, commentId });
-  return { status: 200, body: { ok: true, deleted: 1 } };
-}
-async function loadPrivateNotes(env, user) {
-  const key = `private:${user}:notes`;
-  const raw = await env.ENGR_KV.get(key);
-  if (raw) return { key, items: JSON.parse(raw) };
-
-  const account = await getUserAccount(env, user);
-  if (account?.displayName && account.displayName !== user) {
-    const legacyKey = `private:${account.displayName}:notes`;
-    const legacyRaw = await env.ENGR_KV.get(legacyKey);
-    if (legacyRaw) {
-      const items = JSON.parse(legacyRaw).slice(0, 300);   // L-1: 저장본과 동일하게 슬라이스해 반환(첫 GET 초과노출 방지)
-      await env.ENGR_KV.put(key, JSON.stringify(items));
-      return { key, items, migratedFrom: legacyKey };
-    }
-  }
-  return { key, items: [] };
-}
-async function getUserPinHash(env, name) {
-  if (!name) return '';
-  try { return await env.ENGR_KV.get(`userpin:${name}`) || ''; } catch (_) { return ''; }
-}
-async function validateUserPin(env, name, pin) {
-  const userHash = await getUserPinHash(env, name);
-  if (userHash) return (await sha256Hex(pin)) === userHash;
-  if (env.TEAM_PIN) return pin === env.TEAM_PIN;
-  if (env.PIN_HASH) return (await sha256Hex(pin)) === env.PIN_HASH;
-  return false;
-}
-async function setUserPin(env, name, pin) {
-  await env.ENGR_KV.put(`userpin:${name}`, await sha256Hex(pin));
-}
-
-//
-//
-//
-async function getAdmins(env, options = {}) {
-  if (!options.skipUsers) {
-    const users = await getUsers(env);
-    const adminsFromUsers = {};
-    Object.values(users).forEach(u => {
-      if (u.active !== false && (u.role === 'admin' || u.role === 'super')) adminsFromUsers[u.id] = u.role;
-    });
-    if (Object.keys(adminsFromUsers).length) return adminsFromUsers;
-  }
-  const raw = await env.ENGR_KV.get('config:admins');
-  if (!raw) return { [SUPER_ADMIN]: 'super' };
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      const obj = {};
-      parsed.forEach(n => {
-        const id = normalizeUserId(n);
-        if (id) obj[id] = (id === SUPER_ADMIN) ? 'super' : 'admin';
-      });
-      return obj;
-    }
-    if (!parsed[SUPER_ADMIN]) parsed[SUPER_ADMIN] = 'super';
-    return Object.fromEntries(Object.entries(parsed).map(([id, role]) => [normalizeUserId(id), role]));
-  } catch { return { [SUPER_ADMIN]: 'super' }; }
-}
-
-async function isSuper(env, user) {
-  if (user === SUPER_ADMIN) return true;
-  const admins = await getAdmins(env);
-  return admins[user] === 'super';
-}
-async function isAdmin(env, user) {
-  const admins = await getAdmins(env);
-  return !!admins[user];
-}
-
-//
-//
-
-
-//
-async function getVtHistory(env) {
-  const raw = await env.ENGR_KV.get('vt:history');
-  if (!raw) return [];
-  try {
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr.slice(0, 20) : [];
-  } catch { return []; }
-}
-async function saveVtHistory(env, user, hash, attrs = {}) {
-  try {
-    const stats = attrs.last_analysis_stats || {};
-    const total = (stats.malicious || 0) + (stats.undetected || 0) + (stats.harmless || 0) + (stats.suspicious || 0);
-    const item = {
-      ts: new Date().toISOString(),
-      user: user || 'unknown',
-      hash,
-      mal: stats.malicious || 0,
-      suspicious: stats.suspicious || 0,
-      harmless: stats.harmless || 0,
-      undetected: stats.undetected || 0,
-      total,
-      name: attrs.meaningful_name || (Array.isArray(attrs.names) ? attrs.names[0] : '') || '',
-      size: attrs.size || 0,
-      type: attrs.type_description || '',
-    };
-    const cur = await getVtHistory(env);
-    const next = [item, ...cur.filter(x => x && x.hash !== hash)].slice(0, 20);
-    await env.ENGR_KV.put('vt:history', JSON.stringify(next));
-    return next;
-  } catch (_) {
-    return null;
-  }
-}
-
-async function auditLog(env, user, type, detail = {}) {
-  try {
-    const now = Date.now();
-    const rand = crypto.randomUUID().slice(0, 8);
-    const rev = String(9999999999999 - now).padStart(13, '0');
-    const id = `${rev}:${type}:${rand}`;
-    const tsIso = new Date(now).toISOString();
-    const item = JSON.stringify({ ...detail, ts: tsIso, tsNum: now, user, type });
-    const ttl = { expirationTtl: 60 * 60 * 24 * 90 };
-    // §H 1단계: KV(기존, 소스 유지) + D1(audit_log, 가산) 이중쓰기. 둘 다 best-effort, 동일 id로 멱등.
-    const kvP = env.ENGR_KV.put(`auditLatest:${id}`, item, ttl);
-    const d1P = env.DB
-      ? env.DB.prepare('INSERT OR IGNORE INTO audit_log (id,ts,ts_num,user,type,detail_json) VALUES (?,?,?,?,?,?)').bind(id, tsIso, now, user, type, JSON.stringify(detail)).run()
-      : Promise.resolve();
-    await Promise.allSettled([kvP, d1P]);
-  } catch (_) {}
-}
-
-//
-function usageKeys(now=new Date()){
-  const p=kstParts(now);
-  return { day:`${p.year}-${p.month}-${p.day}`, month:`${p.year}-${p.month}` };
-}
-function createUsageBucket(){ return { today:0, month:0, successToday:0, successMonth:0, failToday:0, failMonth:0 }; }
-function createUsageStore(){ return { team:createUsageBucket(), users:{} }; }
-function ensureUserUsage(store,user){
-  if(!user)return createUsageBucket();
-  if(!store.users)store.users={};
-  if(!store.users[user])store.users[user]=createUsageBucket();
-  return store.users[user];
-}
-function bumpUsageBucket(b,type,scope){
-  if(type==='AI_REQUEST') b[scope==='day'?'today':'month']=(b[scope==='day'?'today':'month']||0)+1;
-  if(type==='AI_SUCCESS') b[scope==='day'?'successToday':'successMonth']=(b[scope==='day'?'successToday':'successMonth']||0)+1;
-  if(type==='AI_FAIL') b[scope==='day'?'failToday':'failMonth']=(b[scope==='day'?'failToday':'failMonth']||0)+1;
-}
-async function updateAIUsage(env,user,outcome,model){
-  if(!['success','fail','cached'].includes(outcome))return;
-  try{
-    const keys=usageKeys();
-    const kvKey=`usage:v2:${keys.month}`;
-    let store={days:{},team:createUsageBucket(),users:{}};
-    try{const raw=await env.ENGR_KV.get(kvKey);if(raw)store=JSON.parse(raw);}catch(_){ }
-    if(!store.days)store.days={};
-    if(!store.days[keys.day])store.days[keys.day]={team:createUsageBucket(),users:{}};
-    if(!store.team)store.team=createUsageBucket();
-    if(!store.users)store.users={};
-    const dayStore=store.days[keys.day];
-    if(!dayStore.team)dayStore.team=createUsageBucket();
-    if(!dayStore.users)dayStore.users={};
-    const type=outcome==='fail'?'AI_FAIL':'AI_SUCCESS';
-    bumpUsageBucket(dayStore.team,'AI_REQUEST','day');
-    bumpUsageBucket(store.team,'AI_REQUEST','month');
-    bumpUsageBucket(dayStore.team,type,'day');
-    bumpUsageBucket(store.team,type,'month');
-    // 모델(제공자)별 호출 카운트 — 실제 호출(성공/캐시)만
-    if(outcome!=='fail'){
-      const provider=String(model||'').includes('gemini')?'gemini':'llama';
-      if(!dayStore.team.models)dayStore.team.models={};
-      if(!store.team.models)store.team.models={};
-      dayStore.team.models[provider]=(dayStore.team.models[provider]||0)+1;
-      store.team.models[provider]=(store.team.models[provider]||0)+1;
-    }
-    if(user){
-      bumpUsageBucket(ensureUserUsage(dayStore,user),'AI_REQUEST','day');
-      bumpUsageBucket(ensureUserUsage(store,user),'AI_REQUEST','month');
-      bumpUsageBucket(ensureUserUsage(dayStore,user),type,'day');
-      bumpUsageBucket(ensureUserUsage(store,user),type,'month');
-    }
-    store.updatedAt=new Date().toISOString();
-    await env.ENGR_KV.put(kvKey,JSON.stringify(store),{expirationTtl:60*60*24*400});
-  }catch(_){ }
-}
-async function readUsageCounter(env,user=''){
-  const keys=usageKeys();
-  try{
-    const raw=await env.ENGR_KV.get(`usage:v2:${keys.month}`);
-    if(raw){
-      const store=JSON.parse(raw);
-      const day=store.days?.[keys.day]||{};
-      const u=(user||'').trim();
-      const team={
-        today:day.team?.today||0,
-        month:store.team?.month||0,
-        successToday:day.team?.successToday||0,
-        successMonth:store.team?.successMonth||0,
-        failToday:day.team?.failToday||0,
-        failMonth:store.team?.failMonth||0,
-        modelsToday:day.team?.models||{},
-        modelsMonth:store.team?.models||{},
-      };
-      const du=u?(day.users?.[u]||{}):{};
-      const mu=u?(store.users?.[u]||{}):{};
-      const me={
-        today:du.today||0,
-        month:mu.month||0,
-        successToday:du.successToday||0,
-        successMonth:mu.successMonth||0,
-        failToday:du.failToday||0,
-        failMonth:mu.failMonth||0,
-      };
-      return {ok:true,timezone:'Asia/Seoul',asOf:new Date().toISOString(),source:'counter_v2',note: 'AI usage counter data.',me,team};
-    }
-  }catch(_){ }
-  let daily=null, monthly=null;
-  try{const raw=await env.ENGR_KV.get(`usage:daily:${keys.day}`);if(raw)daily=JSON.parse(raw);}catch(_){ }
-  try{const raw=await env.ENGR_KV.get(`usage:monthly:${keys.month}`);if(raw)monthly=JSON.parse(raw);}catch(_){ }
-  if(!daily&&!monthly)return null;
-  const u=(user||'').trim();
-  const team={
-    today:daily?.team?.today||0,
-    month:monthly?.team?.month||0,
-    successToday:daily?.team?.successToday||0,
-    successMonth:monthly?.team?.successMonth||0,
-    failToday:daily?.team?.failToday||0,
-    failMonth:monthly?.team?.failMonth||0,
-  };
-  const du=u?(daily?.users?.[u]||{}):{};
-  const mu=u?(monthly?.users?.[u]||{}):{};
-  const me={
-    today:du.today||0,
-    month:mu.month||0,
-    successToday:du.successToday||0,
-    successMonth:mu.successMonth||0,
-    failToday:du.failToday||0,
-    failMonth:mu.failMonth||0,
-  };
-  return {ok:true,timezone:'Asia/Seoul',asOf:new Date().toISOString(),source:'counter',note: 'AI usage counter data.',me,team};
-}
-
-//
-async function callAI(env, userPrompt, mode = 'technical_analysis') {
-  mode = normalizeAIMode(mode);
-  //
-  let systemPrompt = '';
-  try { systemPrompt = await env.ENGR_KV.get('config:ai_system') || ''; } catch (_) {}
-
-  if (!systemPrompt.trim()) {
-    systemPrompt = `You are a security engineering operations assistant for ENGR HUB.
-Separate confirmed facts from assumptions. Do not invent Jira, log, KB, or customer data.
-Mask or omit credentials, PINs, API keys, tokens, cookies, internal URLs, and personal data.
-For log analysis, start with evidence from logs, then facts, possible causes, impact, checks, actions, and next questions.
-Customer-facing drafts must be concise, polite, and limited to confirmed facts.
-All outputs are review drafts for humans; never instruct automatic customer sending, Jira changes, policy changes, or data deletion.`.trim();
-  }
-  const promptLimit = mode === 'log' ? 18000 : 24000;
-  const rawPrompt = redactSensitiveText(userPrompt || '');
-  const clippedPrompt = rawPrompt.length > promptLimit
-    ? rawPrompt.slice(0, promptLimit) + `\n\n[\uC785\uB825\uC774 \uB108\uBB34 \uAE38\uC5B4 ${promptLimit}\uC790\uB85C \uC904\uC600\uC2B5\uB2C8\uB2E4.]`
-    : rawPrompt;
-
-  //
-  const fullText = `[SYSTEM]${systemPrompt}\n[USER]${clippedPrompt}`;
-  const hash = await sha256Hex(mode + '|' + fullText);
-  const cacheKey = `ai:v3:${mode}:${hash.slice(0, 40)}`;  // v3: 옛 워커가 text를 배열로 저장한 오염 캐시 무효화(callAI 비-string 방어와 함께)
-
-  //
-  try {
-    const cached = await env.ENGR_KV.get(cacheKey);
-    if (cached) {
-      const data = JSON.parse(cached);
-      data._cached = true;
-      return data;
-    }
-  } catch (_) {}
-
-  //
-  let userText = clippedPrompt;
-
-  //
-  let text = '';
-  let modelUsed = '';
-
-  // 1\uC21C\uC704: Google Gemini (\uBB34\uB8CC \uB4F1\uAE09) \u2014 GEMINI_API_KEY \uB610\uB294 GEMINI_KEY \uC124\uC815 \uC2DC
-  const geminiKey = env.GEMINI_API_KEY || env.GEMINI_KEY;
-  if (geminiKey) {
-    try {
-      const gModel = env.GEMINI_MODEL || 'gemini-2.5-flash';
-      const gRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${gModel}:generateContent?key=${geminiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents: [{ role: 'user', parts: [{ text: userText }] }],
-          // maxOutputTokens 상향 + thinking 비활성화(2.5-flash는 사고 토큰이 출력예산을 잠식해 답변이 잘림)
-          generationConfig: { temperature: 0.4, maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 0 } },
-        }),
-      });
-      if (gRes.ok) {
-        const gData = await gRes.json();
-        text = (gData?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('') || '';
-        if (text) modelUsed = gModel;
-      }
-    } catch (_) {}
-  }
-
-  // \uD3F4\uBC31: Cloudflare Workers AI (Llama) \u2014 Gemini \uBBF8\uC124\uC815/\uC2E4\uD328 \uC2DC (\uBB34\uBE44\uC6A9)
-  if (!text) {
-    const response = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userText },
-      ],
-      max_tokens: 8192,
-      temperature: 0.4,
-    });
-    text = response?.response || '';
-    if (text) modelUsed = 'llama-3.3-70b';
-  }
-
-  if (!text) throw new Error('AI \uC751\uB2F5\uC774 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.');
-
-  //
-  const result = {
-    candidates: [{ content: { parts: [{ text }] } }],
-    _model: modelUsed,
-  };
-
-  //
-  try {
-    await env.ENGR_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: 60 * 60 * 24 * 7 });
-  } catch (_) {}
-
-  return result;
-}
-
-//
-async function handleJiraSearch(env, user = "") {
-  let months = 3;
-  try {
-    const cfg = await env.ENGR_KV.get('config:range_months') || await env.ENGR_KV.get('config:jira_range_months');
-    if (cfg) months = parseInt(cfg, 10) || 3;
-  } catch (_) {}
-  months = Math.max(1, Math.min(60, months));
-
-  const d = new Date();
-  d.setMonth(d.getMonth() - months);
-  const dateStr = d.toISOString().slice(0, 10);
-  const jql = `project=ENGR AND created >= "${dateStr}" ORDER BY created DESC`;
-
-  const jiraAuth = 'Basic ' + btoa('mj.park@escare.co.kr:' + env.JIRA_TOKEN);
-  const headers = {
-    'Authorization': jiraAuth,
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-  };
-
-  //
-  const fields = ['summary','status','priority','assignee','reporter','created','updated','labels','issuetype','parent','duedate','customfield_10134','customfield_10036','customfield_10178','customfield_10015','customfield_10244'];
-
-  let allIssues = [];
-  let nextPageToken = undefined;
-  let pageCount = 0;
-  const maxPages = 12; // Up to 1,200 issues per sync to protect Worker CPU.
-  do {
-    const body = { jql, maxResults: 100, fieldsByKeys: false, fields };
-    if (nextPageToken) body.nextPageToken = nextPageToken;
-    const res = await fetch('https://escare-engr.atlassian.net/rest/api/3/search/jql', {
-      method: 'POST', headers, body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const errText = await res.text();
-      return new Response(errText, { status: res.status, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json; charset=utf-8' } });
-    }
-    const page = await res.json();
-    allIssues = allIssues.concat(page.issues || []);
-    nextPageToken = page.nextPageToken;
-    pageCount++;
-  } while (nextPageToken && pageCount < maxPages);
-
-  const sync = { rangeMonths: months, count: allIssues.length, syncedAt: new Date().toISOString(), syncedBy: user || 'system', jql, lightweight: true, truncated: !!nextPageToken, pages: pageCount };
-  try { await env.ENGR_KV.put('config:last_jira_sync', JSON.stringify(sync)); } catch (_) {}
-  return new Response(JSON.stringify({ issues: allIssues, total: allIssues.length, rangeMonths: months, sync }), {
-    headers: { ...CORS_HEADERS, 'Content-Type': 'application/json; charset=utf-8' },
-  });
-}
-
-
-//
-const KB_PRODUCT_SEED = [
-  { product:'DLP', q:'Symantec Data Loss Prevention DLP', topics:['install upgrade','agent endpoint','policy detection','incident response','enforce server','database oracle','email prevent','network prevent','discover scan','troubleshooting logs'] },
-  { product:'SEP', q:'Symantec Endpoint Protection SEP SEPM 14.3', topics:['install upgrade','client communication','definitions LiveUpdate','policy configuration','content update','database embedded','replication','EDR ATP integration','uninstall cleanwipe','troubleshooting logs'] },
-  { product:'CASB', q:'CloudSOC CASB Gatelet Securlet', topics:['gatelet','securlet','SAML SSO','user sync','policy incident','data exposure','API connection','office 365','salesforce','troubleshooting'] },
-  { product:'SWG', q:'Cloud SWG Secure Web Gateway', topics:['policy','access method','authentication','SAML','PAC file','traffic forwarding','SSL interception','reporting','agent','troubleshooting'] },
-  { product:'WSS', q:'Web Security Service WSS Cloud SWG', topics:['WSS Agent','explicit proxy','IPSec','auth connector','portal policy','SSL inspection','bypass','roaming users','reporting','troubleshooting'] },
-  { product:'LUA', q:'Symantec LiveUpdate Administrator LUA', topics:['install upgrade','download schedule','distribution center','SEP content','proxy setting','certificate','database','cleanup','performance','troubleshooting logs'] },
-  { product:'ProxySG', q:'ProxySG SGOS Advanced Secure Gateway', topics:['SGOS upgrade','policy CPL','SSL proxy','authentication realm','ICAP','content filtering','access log','proxy forwarding','certificate','troubleshooting'] },
-];
-function kbSeedItems(){
-  return KB_PRODUCT_SEED.flatMap(seed=>seed.topics.map(topic=>({
-    title:`KB recent 5 years - ${seed.product} - ${topic}`,
-    category:'Broadcom KB',
-    product:seed.product,
-    q:`${seed.q} ${topic}`,
-  })));
-}
-function htmlDecode(s=''){
-  return String(s)
-    .replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'")
-    .replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/\s+/g,' ').trim();
-}
-function stripTags(s=''){return htmlDecode(String(s).replace(/<[^>]+>/g,' '));}
-function kbArticleTitleFromSlug(slug=''){
-  return slug.replace(/-/g,' ').replace(/\s+/g,' ').trim().replace(/\b\w/g,m=>m.toUpperCase());
-}
-function kbCursorEncode(cursor){
-  try{return btoa(JSON.stringify(cursor)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}catch(_){return '';}
-}
-function kbCursorDecode(raw){
-  if(!raw)return { task:0, page:0 };
-  try{
-    const padded = String(raw).replace(/-/g,'+').replace(/_/g,'/');
-    return { task:0, page:0, ...JSON.parse(atob(padded + '==='.slice((padded.length + 3) % 4))) };
-  }catch(_){return { task:0, page:0 };}
-}
-function normalizeKbArticleUrl(raw=''){
-  try{
-    const u = new URL(String(raw).trim());
-    if(u.hostname !== 'knowledge.broadcom.com')return null;
-    const m = u.pathname.match(/^\/external\/article\/(\d+)(?:\/([^/?#]+))?/i);
-    if(!m)return null;
-    const slug = (m[2] || '').replace(/\.html$/i,'');
-    const path = slug ? `/external/article/${m[1]}/${slug}` : `/external/article/${m[1]}`;
-    return { articleId:m[1], slug, url:`https://knowledge.broadcom.com${path}` };
-  }catch(_){return null;}
-}
-function extractKbDate(html=''){
-  const text = stripTags(html).slice(0, 12000);
-  const metaPatterns = [
-    /(?:dateModified|article:modified_time|modified_time|lastmod)["'][^>]+content=["']([^"']+)["']/i,
-    /(?:datePublished|article:published_time|published_time)["'][^>]+content=["']([^"']+)["']/i,
-    /(?:Updated|Last Updated|Modified|Published)\s*:?\s*([A-Z][a-z]+ \d{1,2}, \d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4})/i
-  ];
-  for(const re of metaPatterns){
-    const m = html.match(re) || text.match(re);
-    if(m){
-      const d = new Date(m[1]);
-      if(!Number.isNaN(d.getTime()))return d.toISOString();
-    }
-  }
-  return null;
-}
-function extractKbTitle(html='', fallback=''){
-  const candidates = [
-    html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1],
-    html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1],
-    html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1],
-    fallback
-  ];
-  return stripTags(candidates.find(Boolean) || '').replace(/\s*\|\s*Broadcom\s*$/i,'') || fallback;
-}
-function kbSearchTasks(){
-  return kbSeedItems().map(seed=>({
-    product: seed.product,
-    q: `site:knowledge.broadcom.com/external/article ${seed.q}`,
-    queryLabel: seed.q
-  }));
-}
-const KB_VERIFIED_SEED = [
-  { product:'SEP', title:'Versions, system requirements, release dates - SEP/SES 14.3.x', url:'https://knowledge.broadcom.com/external/article/154575' },
-  { product:'SEP', title:'Versions, system requirements, release dates - SEP/SES 16.x', url:'https://knowledge.broadcom.com/external/article/397614' },
-  { product:'SEP', title:'New fixes and component versions in SEP 14.3 RU10', url:'https://knowledge.broadcom.com/external/article/386578' },
-  { product:'SEP', title:'New fixes and component versions in SEP 14.4', url:'https://knowledge.broadcom.com/external/article/430629' },
-  { product:'SEP', title:"What's new for all releases of Symantec Endpoint Protection 14.x", url:'https://knowledge.broadcom.com/external/article/185214' },
-  { product:'SEP', title:'Windows compatibility with Symantec Endpoint Protection clients', url:'https://knowledge.broadcom.com/external/article/163625' },
-  { product:'SEP', title:'Product guides for Symantec Endpoint Protection', url:'https://knowledge.broadcom.com/external/article/185213' },
-  { product:'SEP', title:'Download the latest version of Endpoint Protection', url:'https://knowledge.broadcom.com/external/article/157395' },
-  { product:'SEP', title:'SEP CVE/security advisory portal', url:'https://knowledge.broadcom.com/external/article/225891' },
-  { product:'DLP', title:'DLP Endpoint Agent build numbers and latest hotfix information', url:'https://knowledge.broadcom.com/external/article/185118' },
-  { product:'DLP', title:'Symantec Data Loss Prevention - Release types', url:'https://knowledge.broadcom.com/external/article/164993' },
-  { product:'DLP', title:'DLP Quick Upgrade Guides', url:'https://knowledge.broadcom.com/external/article/270589' },
-  { product:'DLP', title:'High Level Steps for Upgrading DLP', url:'https://knowledge.broadcom.com/external/article/247415' },
-  { product:'DLP', title:'DLP Release Cadence', url:'https://knowledge.broadcom.com/external/article/211665' },
-  { product:'DLP', title:'Recent DLP Product Advisories', url:'https://knowledge.broadcom.com/external/article/269358' },
-  { product:'DLP', title:'DLP CVE-2025-22228 impact', url:'https://knowledge.broadcom.com/external/article/430578' },
-  { product:'DLP', title:'DLP CVE-2025-41249 impact', url:'https://knowledge.broadcom.com/external/article/417005' },
-  { product:'DLP', title:'DLP CVE-2025-21587 impact', url:'https://knowledge.broadcom.com/external/article/404445' },
-  { product:'DLP', title:'DLP CVE-2025-22233 impact', url:'https://knowledge.broadcom.com/external/article/404795' },
-  { product:'DLP', title:'DLP CVE-2025-48976 impact', url:'https://knowledge.broadcom.com/external/article/417030' },
-  { product:'ProxySG', title:'End of life and lifecycle for Edge SWG/ProxySG/ASG', url:'https://knowledge.broadcom.com/external/article/151102' },
-  { product:'ProxySG', title:'Edge SWG ProxySG - Network Web Prevent DLP integration', url:'https://knowledge.broadcom.com/external/article/230914' },
-  { product:'ProxySG', title:'Secure ICAP between DLP detection server and ProxySG', url:'https://knowledge.broadcom.com/external/article/383826' },
-  { product:'ProxySG', title:'ISG/MC/SGOS/Reporter CVE-2025-32728 impact', url:'https://knowledge.broadcom.com/external/article/400771' },
-  { product:'Support', title:'Advanced search options on the Broadcom Support Portal', url:'https://knowledge.broadcom.com/external/article/200997' },
-  { product:'Support', title:'Search personalization features on the Broadcom Support Portal', url:'https://knowledge.broadcom.com/external/article/201253' },
-  { product:'Support', title:'Subscribe to a Broadcom knowledge article by article or product', url:'https://knowledge.broadcom.com/external/article/275360' },
-  { product:'Support', title:'Accessing Broadcom knowledge base articles from a case', url:'https://knowledge.broadcom.com/external/article/252162' },
-];
-function collectKbUrlsFromText(value, source='text'){
-  const text = typeof value === 'string' ? value : JSON.stringify(value || '');
+// ── 자료실(newsroom) 최근 업데이트 집계 — /analysis/latest·/team/digest 공용, 결정적·비용0 ──
+async function buildArchiveUpdates(env, days = 7) {
+  const cutoff = Date.now() - days * 86400000;
+  const parseT = s => { const t = Date.parse(s || ''); return isNaN(t) ? 0 : t; };
+  const readArr = async k => { try { const raw = await env.ENGR_KV.get(k); const a = raw ? JSON.parse(raw) : []; return Array.isArray(a) ? a : []; } catch (_) { return []; } };
   const out = [];
-  const full = /https?:\/\/knowledge\.broadcom\.com\/external\/article\/\d+(?:\/[A-Za-z0-9-]+)?/gi;
-  const query = /https?:\/\/knowledge\.broadcom\.com\/external\/article\?articleId=(\d+)/gi;
-  let m;
-  while((m=full.exec(text)))out.push({ url:m[0], source });
-  while((m=query.exec(text)))out.push({ url:`https://knowledge.broadcom.com/external/article/${m[1]}`, source });
+  const counts = { links: 0, knowledge: 0, eos: 0, compat: 0 };
+  for (const it of await readArr('config:links')) {
+    const created = parseT(it.createdAt), t = Math.max(created, parseT(it.updatedAt));
+    if (t < cutoff) continue; counts.links++;
+    out.push({ kind: 'link', icon: '🔗', label: '링크', title: String(it.title || it.url || '').slice(0, 90), when: t, by: it.updatedBy || it.createdBy || '', ai: !!it.aiSuggested, isNew: created >= cutoff });
+  }
+  for (const it of await readArr('config:knowledge')) {
+    const created = parseT(it.createdAt), t = Math.max(created, parseT(it.updatedAt));
+    if (t < cutoff) continue; counts.knowledge++;
+    out.push({ kind: 'know', icon: '📘', label: '노하우', title: String(it.title || '').slice(0, 90), when: t, by: it.updatedBy || it.createdBy || '', isNew: created >= cutoff });
+  }
+  for (const it of await readArr('config:eos')) {
+    const created = parseT(it.createdAt);
+    if (created < cutoff) continue; counts.eos++;
+    out.push({ kind: 'eos', icon: '📄', label: '라이선스', title: `${it.customer || ''} ${it.productDesc || it.product || ''}`.trim().slice(0, 90), when: created, by: it.createdBy || '', isNew: true });
+  }
+  try {
+    const r = await env.DB.prepare("SELECT product, product_version, os, status, verified_by, verified_at, updated_at FROM compat_matrix").all();
+    for (const row of (r.results || [])) {
+      const vt = parseT(row.verified_at), t = Math.max(vt, parseT(row.updated_at));
+      if (t < cutoff) continue;
+      const confirmed = row.status === 'confirmed' && vt >= cutoff; counts.compat++;
+      out.push({ kind: 'compat', icon: '🧩', label: confirmed ? '매트릭스 확정' : '매트릭스 초안', title: `${row.product || ''} ${row.product_version || ''}/${row.os || ''}`.trim().slice(0, 90), when: t, by: (confirmed ? row.verified_by : '') || '', isNew: !confirmed });
+    }
+  } catch (_) {}
+  out.sort((a, b) => b.when - a.when);
+  return { days, counts, items: out.slice(0, 8) };
+}
+
+// ── 다이제스트 데이터 집계 (텍스트/카드 공용) — 주 쿼리 실패 시 throw ──
+async function buildDigestData(env) {
+  const day = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);  // KST 오늘
+  const dayMs = new Date(day + 'T00:00:00Z').getTime();
+  const issues = await jiraSearchJql(env, `project = ENGR AND statusCategory != Done AND duedate <= "${day}" ORDER BY duedate ASC`, TEAM_FIELDS, 5);
+  const custList = await getCustomersD1(env);
+  const mapped = issues.map(it => mapJiraIssue(it, custList)).filter(i => !/hands[\s-]?on/i.test(i.summary || ''));
+  const dueToday = [], overdue = [];
+  for (const i of mapped) {
+    const dd = (i.duedate || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dd)) continue;
+    const cust = (i.cls && (i.cls.customer || i.cls.bracket)) || '';
+    const row = { key: i.key, assignee: i.assignee || '-', customer: cust, summary: (i.summary || '').replace(/^\s*\[[^\]]*\]\s*/, ''), duedate: dd };
+    if (dd === day) dueToday.push(row);
+    else if (dd < day) { row.overdueDays = Math.round((dayMs - new Date(dd + 'T00:00:00Z').getTime()) / 86400000); overdue.push(row); }
+  }
+  let eosItems = [];
+  try { const raw = await env.ENGR_KV.get('config:eos'); if (raw) eosItems = JSON.parse(raw); } catch (_) {}
+  const licenseSoon = [];
+  for (const e of (Array.isArray(eosItems) ? eosItems : [])) {
+    const exp = (e.expireDate || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(exp)) continue;
+    const dday = Math.ceil((new Date(exp + 'T00:00:00Z').getTime() - dayMs) / 86400000);
+    if (dday >= 0 && dday <= 30) licenseSoon.push({ customer: e.customer || '', product: e.productDesc || e.product || '', dday, expireDate: exp });
+  }
+  licenseSoon.sort((a, b) => a.dday - b.dday);
+  let metaIssues = [];
+  try { metaIssues = await jiraSearchJql(env, `project = ENGR AND statusCategory != Done ORDER BY updated DESC`, [...TEAM_FIELDS, 'customfield_10036'], 5); } catch (_) {}
+  const metaByA = {};
+  for (const it of metaIssues) {
+    const f = it.fields || {};
+    if (/hands[\s-]?on/i.test(f.summary || '')) continue;
+    const miss = [];
+    if (!(Array.isArray(f.customfield_10134) && f.customfield_10134.length)) miss.push('고객사');
+    if (!((f.labels || []).length)) miss.push('레이블');
+    const cat = f.customfield_10036 && f.customfield_10036.value;
+    if (!cat || cat === 'N/A') miss.push('범주');
+    if (!f.duedate) miss.push('기한');
+    if (!miss.length) continue;
+    const a = (f.assignee && f.assignee.displayName) || '(미지정)';
+    const g = metaByA[a] || (metaByA[a] = { count: 0, fields: {} });
+    g.count++; miss.forEach(m => g.fields[m] = (g.fields[m] || 0) + 1);
+  }
+  const metaRows = Object.entries(metaByA).sort((a, b) => b[1].count - a[1].count).map(([assignee, v]) => ({ assignee, count: v.count, fields: v.fields }));
+  const metaTotal = metaRows.reduce((s, r) => s + r.count, 0);
+  let team = null;
+  try { const ts = await env.DB.prepare("SELECT payload_json FROM analysis_snapshot WHERE kind='team' ORDER BY built_at DESC LIMIT 1").first(); if (ts) team = JSON.parse(ts.payload_json); } catch (_) {}
+  let archive = null;
+  try { archive = await buildArchiveUpdates(env, 7); } catch (_) {}
+  const ydayMs = dayMs - 86400000;
+  const yday = new Date(ydayMs).toISOString().slice(0, 10);
+  let doneY = [];
+  try {
+    const di = await jiraSearchJql(env, `project = ENGR AND resolved >= "${yday}" AND resolved < "${day}" ORDER BY resolved DESC`, TEAM_FIELDS, 3);
+    doneY = di.map(it => mapJiraIssue(it, custList)).filter(i => !/hands[\s-]?on/i.test(i.summary || '')).map(i => ({ key: i.key, assignee: i.assignee || '-', customer: (i.cls && (i.cls.customer || i.cls.bracket)) || '', summary: (i.summary || '').replace(/^\s*\[[^\]]*\]\s*/, '') }));
+  } catch (_) {}
+  const WD = ['일', '월', '화', '수', '목', '금', '토'];
+  const dObj = new Date(day + 'T00:00:00Z');
+  const dateLabel = `${dObj.getUTCMonth() + 1}/${dObj.getUTCDate()}(${WD[dObj.getUTCDay()]})`;
+  const sents = (txt, n) => String(txt || '').split(/(?<=다\.)\s+/).map(s => s.trim()).filter(Boolean).slice(0, n);
+  const mgmtTotal = dueToday.length + overdue.length + metaTotal + licenseSoon.length;
+  const headline = team ? [...sents(team.monthly, 2), ...sents(team.patterns, 1)].filter(Boolean).slice(0, 3) : [];
+  const patternLines = team ? sents(team.patterns, 3) : [];
+  const archItems = (archive && archive.items) || [];
+  return { day, dateLabel, dueToday, overdue, metaRows, metaTotal, licenseSoon, doneY, archItems, archiveDays: (archive && archive.days) || 7, headline, patternLines, mgmtTotal };
+}
+
+// ── 다이제스트 → Teams Adaptive Card (Power Automate flow가 GET해서 채널에 게시) ──
+function buildDigestCard(D, hubUrl, notice) {
+  const esc = s => String(s || '').replace(/\s+/g, ' ').trim();
+  const tb = (text, opt) => Object.assign({ type: 'TextBlock', text, wrap: true }, opt || {});
+  const clip = (s, n) => { const x = esc(s); return x.length > n ? x.slice(0, n - 1) + '…' : x; };
+  const body = [];
+  body.push({ type: 'Container', style: 'accent', bleed: true, items: [tb(`📰 보안기술팀 브리핑 — ${D.dateLabel}`, { weight: 'Bolder', size: 'Large' })] });
+  if (notice && String(notice).trim()) {
+    const nlines = String(notice).split('\n').map(x => x.trim()).filter(Boolean);
+    const nitems = [tb('📢 공지사항', { weight: 'Bolder' })];
+    nlines.forEach(ln => nitems.push(tb('• ' + esc(ln), { weight: 'Bolder', spacing: 'Small' })));
+    body.push({ type: 'Container', style: 'warning', spacing: 'Small', items: nitems });
+  }
+  const empty = !D.mgmtTotal && !D.headline.length && !D.doneY.length;
+  if (empty) {
+    body.push({ type: 'Container', style: 'good', spacing: 'Medium', items: [tb('🎉 오늘은 관리 필요·신규 소식이 없습니다 — 깔끔한 하루 되세요!', { weight: 'Bolder', color: 'Good' })] });
+  } else {
+    body.push(tb(`⚡ 관리 필요 ${D.mgmtTotal}   ·   마감 ${D.dueToday.length}   ·   지연 ${D.overdue.length}   ·   미기입 ${D.metaTotal}   ·   만료임박 ${D.licenseSoon.length}`, { isSubtle: true, spacing: 'Small' }));
+    const bullet = (it, t, opt) => it.push(tb('• ' + t, Object.assign({ spacing: 'Small' }, opt || {})));
+    const section = (title, style, headColor, build) => { const it = [tb(title, { weight: 'Bolder', size: 'Medium', color: headColor || 'Accent' })]; build(it, bullet); body.push({ type: 'Container', style: style || 'emphasis', spacing: 'Medium', separator: true, items: it }); };
+    const more = (it, n) => { if (n > 0) it.push(tb(`…외 ${n}건 → HUB에서`, { isSubtle: true, size: 'Small', spacing: 'Small' })); };
+    if (D.headline.length) section('🗞 헤드라인', 'emphasis', 'Accent', (it, b) => D.headline.slice(0, 2).forEach(s => b(it, clip(s, 120))));
+    if (D.doneY.length) section(`📌 어제의 성과 (완료 ${D.doneY.length}건)`, 'good', 'Good', (it, b) => { D.doneY.slice(0, 5).forEach(r => b(it, `**${r.assignee}**: ${r.customer ? '[' + r.customer + '] ' : ''}${clip(r.summary, 48)}`)); more(it, D.doneY.length - 5); });
+    if (D.mgmtTotal) section('🚨 지금 관리 필요', 'attention', 'Attention', (it, b) => {
+      if (D.dueToday.length) { it.push(tb(`⏰ 오늘 마감 ${D.dueToday.length}`, { weight: 'Bolder', spacing: 'Medium' })); D.dueToday.slice(0, 6).forEach(r => b(it, `${r.assignee}: ${r.customer ? '[' + r.customer + '] ' : ''}${clip(r.summary, 50)} (${r.key})`)); more(it, D.dueToday.length - 6); }
+      if (D.overdue.length) { it.push(tb(`🔴 지연 ${D.overdue.length}`, { weight: 'Bolder', spacing: 'Medium' })); D.overdue.slice(0, 6).forEach(r => b(it, `${r.assignee}: ${r.customer ? '[' + r.customer + '] ' : ''}${clip(r.summary, 50)} (D+${r.overdueDays}, ${r.key})`)); more(it, D.overdue.length - 6); }
+      if (D.metaTotal) { it.push(tb(`📝 메타 미기입 ${D.metaTotal}`, { weight: 'Bolder', spacing: 'Medium' })); D.metaRows.forEach(r => { const fs = Object.entries(r.fields).sort((a, b2) => b2[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(' · '); b(it, `${r.assignee}: ${r.count}건 (${fs})`); }); }
+      if (D.licenseSoon.length) { it.push(tb(`📄 라이선스 만료 임박 ${D.licenseSoon.length}`, { weight: 'Bolder', spacing: 'Medium' })); D.licenseSoon.slice(0, 6).forEach(r => b(it, `${r.customer} ${clip(r.product, 38)} — D-${r.dday}`)); more(it, D.licenseSoon.length - 6); }
+    });
+  }
+  const base = String(hubUrl || 'https://engr-jira.github.io/engr-hub-dev/').replace(/\/+$/, '');
+  const actions = [{ type: 'Action.OpenUrl', title: '🔗 HUB 열기', url: base + '/' }];
+  if (D.mgmtTotal) actions.push({ type: 'Action.OpenUrl', title: '🚨 이슈 관리', url: base + '/?go=issues' });
+  if (D.licenseSoon.length) actions.push({ type: 'Action.OpenUrl', title: '📄 라이선스', url: base + '/?go=eos' });
+  actions.push({ type: 'Action.OpenUrl', title: '📚 자료실', url: base + '/?go=links' });
+  return { type: 'AdaptiveCard', $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', version: '1.4', body, actions, msteams: { width: 'Full' } };
+}
+
+// ── 팀 공통 블록 — 개인 식별 정보 없음. 대상자 전원이 동일하게 받는다 ──
+// 담당자 이름이 들어가는 것은 무엇도 여기 넣지 말 것(이 카드가 전원에게 가므로 곧 전사 공개와 같다).
+function digestCommonBlocks(D, notice) {
+  const esc = s => String(s || '').replace(/\s+/g, ' ').trim();
+  const clip = (s, n) => { const x = esc(s); return x.length > n ? x.slice(0, n - 1) + '…' : x; };
+  const tb = (text, opt) => Object.assign({ type: 'TextBlock', text, wrap: true }, opt || {});
+  const out = [];
+  if (notice && String(notice).trim()) {
+    const nl = String(notice).split('\n').map(x => x.trim()).filter(Boolean);
+    const it = [tb('📢 공지사항', { weight: 'Bolder' })];
+    nl.forEach(l => it.push(tb('• ' + esc(l), { weight: 'Bolder', spacing: 'Small' })));
+    out.push({ type: 'Container', style: 'warning', spacing: 'Small', items: it });
+  }
+  if (D.headline.length) {
+    const it = [tb('🗞 팀 헤드라인', { weight: 'Bolder', size: 'Medium', color: 'Accent' })];
+    D.headline.slice(0, 2).forEach(s => it.push(tb('• ' + clip(s, 120), { spacing: 'Small' })));
+    out.push({ type: 'Container', style: 'emphasis', spacing: 'Medium', separator: true, items: it });
+  }
+  if (D.licenseSoon.length) {
+    const it = [tb(`📄 라이선스 만료 임박 ${D.licenseSoon.length}건`, { weight: 'Bolder', size: 'Medium', color: 'Warning' })];
+    D.licenseSoon.slice(0, 6).forEach(r => it.push(tb(`• ${r.customer} ${clip(r.product, 38)} — D-${r.dday} (${r.expireDate})`, { spacing: 'Small' })));
+    if (D.licenseSoon.length > 6) it.push(tb(`…외 ${D.licenseSoon.length - 6}건 → HUB에서`, { isSubtle: true, size: 'Small', spacing: 'Small' }));
+    out.push({ type: 'Container', style: 'emphasis', spacing: 'Medium', separator: true, items: it });
+  }
+  out.push(tb(`📊 팀 전체 — 마감 ${D.dueToday.length} · 지연 ${D.overdue.length} · 미기입 ${D.metaTotal} · 만료임박 ${D.licenseSoon.length}`, { isSubtle: true, spacing: 'Medium' }));
   return out;
 }
-async function discoverKbFromJira(env, limit=80){
-  if(!env.JIRA_TOKEN)return [];
-  const jiraAuth = 'Basic ' + btoa('mj.park@escare.co.kr:' + env.JIRA_TOKEN);
-  const body = {
-    jql:'project=ENGR AND text ~ "knowledge.broadcom.com/external/article" ORDER BY updated DESC',
-    maxResults:Math.max(1, Math.min(100, limit)),
-    fieldsByKeys:false,
-    fields:['summary','description','comment','labels','updated']
+function digestHasCommon(D, notice) {
+  return !!((notice && String(notice).trim()) || D.headline.length || D.licenseSoon.length);
+}
+
+// ── 개인별 브리핑 — [팀 공통] + [본인 건] 구성. 대상 기준은 HUB 활성 계정 전원 ──
+// mj.park(팀 리드)만 하드코딩으로 팀 전체 관리 현황을 추가로 받는다.
+const DIGEST_SUPER_USER = 'mj.park';
+async function buildPersonalDigests(env, hubUrl, notice) {
+  const D = await buildDigestData(env);
+  const users = await getUsers(env);
+  const domain = env.MAIL_DOMAIN || 'escare.co.kr';
+  // Jira displayName(한글) 기준으로 먼저 묶는다
+  const byName = {};
+  const bucket = name => {
+    const n = String(name || '').trim(); if (!n || n === '-' || n === '(미지정)') return null;
+    return byName[n] || (byName[n] = { dueToday: [], overdue: [], metaCount: 0, metaFields: {}, doneY: [] });
   };
-  try{
-    const res = await fetch('https://escare-engr.atlassian.net/rest/api/3/search/jql', {
-      method:'POST',
-      headers:{ 'Authorization':jiraAuth, 'Content-Type':'application/json', 'Accept':'application/json' },
-      body:JSON.stringify(body)
+  D.dueToday.forEach(r => { const b = bucket(r.assignee); if (b) b.dueToday.push(r); });
+  D.overdue.forEach(r => { const b = bucket(r.assignee); if (b) b.overdue.push(r); });
+  D.metaRows.forEach(r => { const b = bucket(r.assignee); if (b) { b.metaCount += r.count; b.metaFields = r.fields; } });
+  D.doneY.forEach(r => { const b = bucket(r.assignee); if (b) b.doneY.push(r); });
+  const base = String(hubUrl || 'https://engr-jira.github.io/engr-hub-dev/').replace(/\/+$/, '');
+  const esc = s => String(s || '').replace(/\s+/g, ' ').trim();
+  const clip = (s, n) => { const x = esc(s); return x.length > n ? x.slice(0, n - 1) + '…' : x; };
+  const tb = (text, opt) => Object.assign({ type: 'TextBlock', text, wrap: true }, opt || {});
+  const common = digestCommonBlocks(D, notice);
+  const hasCommon = digestHasCommon(D, notice);
+  const matched = new Set();
+  const out = [];
+  const active = Object.values(users).filter(u => u && u.active !== false && u.id);
+  for (const u of active) {
+    const name = String(u.displayName || '').trim();
+    const p = (name && byName[name]) || { dueToday: [], overdue: [], metaCount: 0, metaFields: {}, doneY: [] };
+    if (name && byName[name]) matched.add(name);
+    const isSuper = u.id === DIGEST_SUPER_USER;
+    const total = p.dueToday.length + p.overdue.length + p.metaCount;
+    // 공통도 없고 본인 건도 없으면 보내지 않는다(빈 카드 방지). 리드는 항상 수신.
+    if (!hasCommon && !total && !p.doneY.length && !isSuper) continue;
+    const body = [{ type: 'Container', style: 'accent', bleed: true, items: [tb(`📋 ${name || u.id}님의 오늘 — ${D.dateLabel}`, { weight: 'Bolder', size: 'Large' })] }];
+    body.push(...JSON.parse(JSON.stringify(common)));   // 카드마다 독립 사본
+    if (total || p.doneY.length) {
+      body.push(tb(total ? `⚡ 내가 챙길 것 ${total}건 — 마감 ${p.dueToday.length} · 지연 ${p.overdue.length} · 미기입 ${p.metaCount}` : '🎉 오늘 내가 챙길 항목은 없습니다!', { isSubtle: true, spacing: 'Medium' }));
+    }
+    if (p.doneY.length) {
+      const it = [tb(`📌 어제의 성과 (완료 ${p.doneY.length}건)`, { weight: 'Bolder', color: 'Good', size: 'Medium' })];
+      p.doneY.slice(0, 5).forEach(r => it.push(tb(`• ${r.customer ? '[' + r.customer + '] ' : ''}${clip(r.summary, 46)}`, { spacing: 'Small' })));
+      body.push({ type: 'Container', style: 'good', spacing: 'Medium', separator: true, items: it });
+    }
+    if (total) {
+      const it = [tb('🚨 내가 지금 챙길 것', { weight: 'Bolder', color: 'Attention', size: 'Medium' })];
+      if (p.dueToday.length) { it.push(tb(`⏰ 오늘 마감 ${p.dueToday.length}`, { weight: 'Bolder', spacing: 'Medium' })); p.dueToday.slice(0, 8).forEach(r => it.push(tb(`• ${r.customer ? '[' + r.customer + '] ' : ''}${clip(r.summary, 48)} (${r.key})`, { spacing: 'Small' }))); }
+      if (p.overdue.length) { it.push(tb(`🔴 지연 ${p.overdue.length}`, { weight: 'Bolder', spacing: 'Medium' })); p.overdue.slice(0, 8).forEach(r => it.push(tb(`• ${r.customer ? '[' + r.customer + '] ' : ''}${clip(r.summary, 48)} (D+${r.overdueDays}, ${r.key})`, { spacing: 'Small' }))); }
+      if (p.metaCount) { const fs = Object.entries(p.metaFields).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(' · '); it.push(tb(`📝 메타 미기입 ${p.metaCount}건 (${fs})`, { weight: 'Bolder', spacing: 'Medium' })); }
+      body.push({ type: 'Container', style: 'attention', spacing: 'Medium', separator: true, items: it });
+    }
+    if (isSuper) body.push(...digestLeadBlocks(D, clip, tb));   // 리드 전용: 팀 전원 현황
+    const actions = [{ type: 'Action.OpenUrl', title: '🔗 내 이슈 보기', url: base + '/?go=issues' }];
+    if (D.licenseSoon.length) actions.push({ type: 'Action.OpenUrl', title: '📄 라이선스', url: base + '/?go=eos' });
+    const card = { type: 'AdaptiveCard', $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', version: '1.4', body, actions, msteams: { width: 'Full' } };
+    out.push({
+      assignee: name || u.id, userId: u.id, email: `${u.id}@${domain}`, lead: isSuper,
+      counts: { due: p.dueToday.length, overdue: p.overdue.length, meta: p.metaCount, done: p.doneY.length },
+      items: { dueToday: p.dueToday, overdue: p.overdue, meta: { count: p.metaCount, fields: p.metaFields }, doneY: p.doneY },
+      card, attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }]
     });
-    if(!res.ok)return [];
-    const data = await res.json();
-    return (data.issues || []).flatMap(issue=>collectKbUrlsFromText(issue, `jira:${issue.key || ''}`));
-  }catch(_){ return []; }
+  }
+  // HUB 계정이 없어 매칭 못 한 Jira 담당자 — 리드 블록에는 보이지만 개인 전달은 불가
+  const unmatched = Object.keys(byName).filter(n => !matched.has(n));
+  return { date: D.day, dateLabel: D.dateLabel, recipients: out, unmatched, hasCommon };
 }
-async function importFreeKbLinks(env, user, years=5, opts={}){
-  const raw = await env.ENGR_KV.get('config:links') || await env.ENGR_KV.get('links');
-  const links = raw ? JSON.parse(raw) : [];
-  const cutoff = new Date(); cutoff.setUTCFullYear(cutoff.getUTCFullYear() - years);
-  const limit = Math.max(1, Math.min(120, parseInt(opts.limit || '80', 10) || 80));
-  const candidates = [
-    ...KB_VERIFIED_SEED.map(x=>({ ...x, source:'curated_seed' })),
-    ...links.flatMap(l=>collectKbUrlsFromText(l, 'existing_links')),
-    ...(await discoverKbFromJira(env, limit))
-  ];
-  const existingArticleIds = new Set(links.map(l=>String(l.articleId || normalizeKbArticleUrl(l.url)?.articleId || '')).filter(Boolean));
-  const existingUrls = new Set(links.map(l=>String(l.url || '').replace(/[?#].*$/,'')));
-  const seen = new Set();
-  let imported = 0, duplicated = 0, inaccessible = 0, scanned = 0, discovered = 0;
-  for(const candidate of candidates){
-    if(scanned >= limit)break;
-    const normalized = normalizeKbArticleUrl(candidate.url);
-    if(!normalized){ inaccessible++; continue; }
-    if(seen.has(normalized.articleId)){ duplicated++; continue; }
-    seen.add(normalized.articleId);
-    scanned++; discovered++;
-    if(existingArticleIds.has(normalized.articleId) || existingUrls.has(normalized.url)){ duplicated++; continue; }
-    const article = await verifyKbArticle({ ...candidate, url:normalized.url, product:candidate.product || 'Broadcom', title:candidate.title || '' }, cutoff);
-    if(!article.ok){ inaccessible++; continue; }
-    const now = new Date().toISOString();
-    links.unshift({
-      id: crypto.randomUUID(),
-      category:'Broadcom KB',
-      product:article.product,
-      articleId:article.articleId,
-      source:'broadcom-kb-free-import',
-      title:`[${article.product}] ${article.title}`,
-      url:article.url,
-      desc:`Free verified import from ${candidate.source || 'known source'}. ${article.dateUnknown ? 'Document date unknown' : 'Document date ' + article.updatedAt.slice(0,10)}. Verified ${now.slice(0,10)}`,
-      updatedAt:article.updatedAt || null,
-      dateUnknown:article.dateUnknown,
-      verifiedAt:now,
-      createdBy:user || 'system',
-      createdAt:now
+// 리드(mj.park) 전용 — 팀 전원의 관리 현황(담당자명 포함)
+function digestLeadBlocks(D, clip, tb) {
+  const out = [];
+  if (D.mgmtTotal) {
+    const it = [tb(`👑 팀 전체 관리 현황 ${D.mgmtTotal}건`, { weight: 'Bolder', size: 'Medium', color: 'Attention' })];
+    if (D.dueToday.length) { it.push(tb(`⏰ 오늘 마감 ${D.dueToday.length}`, { weight: 'Bolder', spacing: 'Medium' })); D.dueToday.slice(0, 10).forEach(r => it.push(tb(`• ${r.assignee}: ${r.customer ? '[' + r.customer + '] ' : ''}${clip(r.summary, 44)} (${r.key})`, { spacing: 'Small' }))); }
+    if (D.overdue.length) { it.push(tb(`🔴 지연 ${D.overdue.length}`, { weight: 'Bolder', spacing: 'Medium' })); D.overdue.slice(0, 10).forEach(r => it.push(tb(`• ${r.assignee}: ${r.customer ? '[' + r.customer + '] ' : ''}${clip(r.summary, 44)} (D+${r.overdueDays}, ${r.key})`, { spacing: 'Small' }))); }
+    if (D.metaTotal) { it.push(tb(`📝 메타 미기입 ${D.metaTotal}`, { weight: 'Bolder', spacing: 'Medium' })); D.metaRows.forEach(r => { const fs = Object.entries(r.fields).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(' · '); it.push(tb(`• ${r.assignee}: ${r.count}건 (${fs})`, { spacing: 'Small' })); }); }
+    out.push({ type: 'Container', style: 'attention', spacing: 'Medium', separator: true, items: it });
+  }
+  if (D.doneY.length) {
+    const it = [tb(`👑 어제 팀 성과 (완료 ${D.doneY.length}건)`, { weight: 'Bolder', size: 'Medium', color: 'Good' })];
+    D.doneY.slice(0, 10).forEach(r => it.push(tb(`• ${r.assignee}: ${r.customer ? '[' + r.customer + '] ' : ''}${clip(r.summary, 44)}`, { spacing: 'Small' })));
+    out.push({ type: 'Container', style: 'good', spacing: 'Medium', separator: true, items: it });
+  }
+  return out;
+}
+// ── 다이제스트 공지사항 (app_settings digest_notice) — 지정 날짜까지 유지, 만료 시 자동 제외 ──
+async function digestGetNotice(env) {
+  try {
+    const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key='digest_notice'").first();
+    if (!r || !r.value) return { text: '', until: '', expired: false };
+    const n = JSON.parse(r.value);
+    const today = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);   // KST
+    const expired = !!(n.until && n.until < today);
+    return { text: expired ? '' : String(n.text || ''), until: String(n.until || ''), by: n.by || '', expired, rawText: String(n.text || '') };
+  } catch (_) { return { text: '', until: '', expired: false }; }
+}
+async function digestSaveNotice(env, text, until, by) {
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)").run();
+    await env.DB.prepare("INSERT INTO app_settings (key,value) VALUES ('digest_notice',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .bind(JSON.stringify({ text: String(text || '').slice(0, 500), until: String(until || '').slice(0, 10), by: String(by || ''), at: Date.now() })).run();
+    return true;
+  } catch (_) { return false; }
+}
+// ── 개인 브리핑 수신자 제어 (app_settings digest_recipients) ──
+// off=전면중단 / test=모든 카드를 지정 1인에게만(원래 수신자 배지) / allow=지정 인원만 / all=전원
+// ⚠️ 전송 대상 축소는 전부 워커에서 수행 — Flow 설정과 무관하게 "테스트가 전원에게 새어나갈" 위험을 차단한다.
+const DIGEST_RECIPIENT_MODES = ['off', 'test', 'allow', 'all'];
+const DIGEST_RECIPIENT_DEFAULTS = { mode: 'test', allow: [], testTo: 'mj.park' };   // 기본값=테스트→MJ (안전 우선)
+async function digestGetRecipients(env) {
+  try {
+    const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key='digest_recipients'").first();
+    if (!r || !r.value) return { ...DIGEST_RECIPIENT_DEFAULTS, allow: [] };
+    const c = JSON.parse(r.value);
+    return {
+      mode: DIGEST_RECIPIENT_MODES.includes(c.mode) ? c.mode : DIGEST_RECIPIENT_DEFAULTS.mode,
+      allow: Array.isArray(c.allow) ? c.allow.map(String).filter(Boolean).slice(0, 100) : [],
+      testTo: String(c.testTo || DIGEST_RECIPIENT_DEFAULTS.testTo),
+      by: String(c.by || ''), at: Number(c.at || 0)
+    };
+  } catch (_) { return { ...DIGEST_RECIPIENT_DEFAULTS, allow: [] }; }
+}
+async function digestSaveRecipients(env, cfg, by) {
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)").run();
+    const v = {
+      mode: DIGEST_RECIPIENT_MODES.includes(cfg.mode) ? cfg.mode : 'test',
+      allow: Array.isArray(cfg.allow) ? cfg.allow.map(String).filter(Boolean).slice(0, 100) : [],
+      testTo: String(cfg.testTo || 'mj.park').slice(0, 60),
+      by: String(by || ''), at: Date.now()
+    };
+    await env.DB.prepare("INSERT INTO app_settings (key,value) VALUES ('digest_recipients',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(v)).run();
+    return v;
+  } catch (_) { return null; }
+}
+// 실제 전송 목록 산출 — 원본 recipients는 건드리지 않는다(미리보기 공용)
+function applyDigestRecipientPolicy(recipients, cfg, domain) {
+  const list = Array.isArray(recipients) ? recipients : [];
+  const mode = DIGEST_RECIPIENT_MODES.includes(cfg && cfg.mode) ? cfg.mode : 'test';
+  if (mode === 'off') return { mode, send: [], held: list.length };
+  if (mode === 'all') return { mode, send: list.slice(), held: 0 };
+  if (mode === 'allow') {
+    const allow = new Set((cfg.allow || []).map(String));
+    const send = list.filter(r => r.userId && allow.has(r.userId));
+    return { mode, send, held: list.length - send.length };
+  }
+  const to = String((cfg && cfg.testTo) || 'mj.park');
+  const toEmail = `${to}@${domain || 'escare.co.kr'}`;
+  const send = list.map(r => {
+    const card = JSON.parse(JSON.stringify(r.card));   // 깊은 복사 — 미리보기 카드에 배지가 남지 않게
+    card.body.splice(1, 0, {
+      type: 'Container', style: 'emphasis', spacing: 'Small',
+      items: [{ type: 'TextBlock', wrap: true, weight: 'Bolder', color: 'Warning', text: `🧪 테스트 발송 — 실제 수신 대상: ${r.assignee}${r.email ? ' (' + r.email + ')' : ''}` }]
     });
-    existingArticleIds.add(article.articleId);
-    existingUrls.add(article.url);
-    imported++;
-  }
-  if(imported > 0)await env.ENGR_KV.put('config:links', JSON.stringify(links));
-  await auditLog(env, user || 'system', 'LINK_KB_IMPORT', { years, imported, duplicated, inaccessible, scanned, discovered, mode:'free_verified' });
-  return { ok:true, imported, added:imported, duplicated, skipped:duplicated, inaccessible, scanned, discovered, years, total:links.length, attempts:0, errors:0, nextCursor:null, mode:'free_verified', cost:'free' };
+    return { ...r, testOf: r.assignee, userId: to, email: toEmail, card, attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] };
+  });
+  return { mode, send, held: 0 };
 }
-async function googleKbSearch(env, task, years, page){
-  const key = env.GOOGLE_SEARCH_KEY;
-  const cx = env.GOOGLE_SEARCH_CX;
-  if(!key || !cx)throw new Error('GOOGLE_SEARCH_KEY and GOOGLE_SEARCH_CX are required for Broadcom KB import.');
-  const api = new URL('https://www.googleapis.com/customsearch/v1');
-  api.searchParams.set('key', key);
-  api.searchParams.set('cx', cx);
-  api.searchParams.set('q', task.q);
-  api.searchParams.set('dateRestrict', `y${years}`);
-  api.searchParams.set('num', '10');
-  api.searchParams.set('start', String(page * 10 + 1));
-  const res = await fetch(api.toString(), { headers:{ 'Accept':'application/json' } });
-  if(!res.ok)throw new Error(`Google search failed: ${res.status}`);
-  const data = await res.json();
-  return (data.items || []).map(item=>({
-    title: item.title || '',
-    url: item.link || '',
-    snippet: item.snippet || '',
-    product: task.product,
-    queryLabel: task.queryLabel
-  }));
-}
-async function verifyKbArticle(candidate, cutoff){
-  const normalized = normalizeKbArticleUrl(candidate.url);
-  if(!normalized)return { ok:false, reason:'not_article' };
-  const res = await fetch(normalized.url, { headers:{ 'Accept':'text/html,application/xhtml+xml', 'User-Agent':'ENGR-HUB-KB-Importer/1.1' } });
-  if(!res.ok)return { ok:false, reason:`http_${res.status}`, articleId:normalized.articleId, url:normalized.url };
-  const html = await res.text();
-  const updatedAt = extractKbDate(html);
-  const dateUnknown = !updatedAt;
-  if(updatedAt && new Date(updatedAt) < cutoff)return { ok:false, reason:'older_than_range', articleId:normalized.articleId, url:normalized.url };
-  const title = extractKbTitle(html, candidate.title || kbArticleTitleFromSlug(normalized.slug) || `Broadcom KB ${normalized.articleId}`);
-  return { ok:true, articleId:normalized.articleId, url:normalized.url, title, product:candidate.product, updatedAt, dateUnknown, queryLabel:candidate.queryLabel };
-}
-async function importPaidKbLinks(env, user, years=5, opts={}){
-  if(!env.GOOGLE_SEARCH_KEY || !env.GOOGLE_SEARCH_CX){
-    return { ok:false, message:'GOOGLE_SEARCH_KEY and GOOGLE_SEARCH_CX Worker secrets are required for Broadcom KB import.', imported:0, duplicated:0, inaccessible:0, scanned:0, discovered:0, mode:'search_api_required' };
-  }
-  const raw = await env.ENGR_KV.get('config:links') || await env.ENGR_KV.get('links');
-  const links = raw ? JSON.parse(raw) : [];
-  let imported = 0, duplicated = 0, inaccessible = 0, scanned = 0, discovered = 0, attempts = 0, errors = 0;
-  const cutoff = new Date(); cutoff.setUTCFullYear(cutoff.getUTCFullYear() - years);
-  const limit = Math.max(1, Math.min(50, parseInt(opts.limit || '20', 10) || 20));
-  const maxQueries = Math.max(1, Math.min(6, parseInt(opts.maxQueries || '3', 10) || 3));
-  const maxPagesPerTask = Math.max(1, Math.min(10, parseInt(opts.maxPagesPerTask || '3', 10) || 3));
-  const tasks = kbSearchTasks();
-  const cursor = kbCursorDecode(opts.cursor || '');
-  let taskIndex = Math.max(0, Math.min(tasks.length, parseInt(cursor.task || 0, 10) || 0));
-  let page = Math.max(0, Math.min(maxPagesPerTask - 1, parseInt(cursor.page || 0, 10) || 0));
-  const seenInRun = new Set();
-  const existingArticleIds = new Set(links.map(l=>String(l.articleId || normalizeKbArticleUrl(l.url)?.articleId || '')).filter(Boolean));
-  const existingUrls = new Set(links.map(l=>String(l.url || '').replace(/[?#].*$/,'')));
-  while(taskIndex < tasks.length && attempts < maxQueries && scanned < limit){
-    const task = tasks[taskIndex];
-    try{
-      attempts++;
-      const results = await googleKbSearch(env, task, years, page);
-      if(!results.length){
-        page = maxPagesPerTask;
-      }
-      for(const result of results){
-        if(scanned >= limit)break;
-        scanned++;
-        const normalized = normalizeKbArticleUrl(result.url);
-        if(!normalized){ inaccessible++; continue; }
-        if(seenInRun.has(normalized.articleId)){ duplicated++; continue; }
-        seenInRun.add(normalized.articleId);
-        discovered++;
-        if(existingArticleIds.has(normalized.articleId) || existingUrls.has(normalized.url)){ duplicated++; continue; }
-        const article = await verifyKbArticle({ ...result, url: normalized.url }, cutoff);
-        if(!article.ok){ inaccessible++; continue; }
-        const now = new Date().toISOString();
-        const item = {
-          id: crypto.randomUUID(),
-          category: 'Broadcom KB',
-          product: article.product,
-          articleId: article.articleId,
-          source: 'broadcom-kb-import',
-          title: `[${article.product}] ${article.title}`,
-          url: article.url,
-          desc: `Broadcom KB Article ${article.articleId}. Imported from ${article.queryLabel}. ${article.dateUnknown ? 'Document date unknown' : 'Document date ' + article.updatedAt.slice(0,10)}. Verified ${now.slice(0,10)}`,
-          updatedAt: article.updatedAt || null,
-          dateUnknown: article.dateUnknown,
-          verifiedAt: now,
-          createdBy: user || 'system',
-          createdAt: now
-        };
-        links.unshift(item);
-        existingArticleIds.add(article.articleId);
-        existingUrls.add(article.url);
-        imported++;
-      }
-      page++;
-      if(page >= maxPagesPerTask){ taskIndex++; page = 0; }
-    }catch(e){
-      errors++;
-      page++;
-      if(page >= maxPagesPerTask){ taskIndex++; page = 0; }
-    }
-  }
-  if(imported > 0)await env.ENGR_KV.put('config:links', JSON.stringify(links));
-  const nextCursor = taskIndex < tasks.length ? kbCursorEncode({ task:taskIndex, page }) : null;
-  await auditLog(env, user || 'system', 'LINK_KB_IMPORT', { years, imported, duplicated, inaccessible, scanned, discovered, attempts, errors, nextCursor:!!nextCursor, mode:'articles' });
-  return { ok:true, imported, added:imported, duplicated, skipped:duplicated, inaccessible, scanned, discovered, years, total:links.length, attempts, errors, nextCursor, mode:'articles' };
-}
-async function importRecentKBLinks(env, user, years=5, opts={}){
-  const provider = String(opts.provider || '').toLowerCase();
-  const paidAllowed = env.KB_ALLOW_PAID_SEARCH === 'true' || provider === 'google';
-  if(paidAllowed)return await importPaidKbLinks(env, user, years, opts);
-  return await importFreeKbLinks(env, user, years, opts);
-}
-function kstParts(d){
-  const fmt = new Intl.DateTimeFormat('ko-KR',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'});
-  return Object.fromEntries(fmt.formatToParts(d).filter(p=>p.type!=='literal').map(p=>[p.type,p.value]));
-}
-function emptyUsageStats(){
-  return { today:0, month:0, successToday:0, successMonth:0, failToday:0, failMonth:0 };
-}
-function addUsage(stats, field, isToday, isMonth){
-  if (isToday) stats[field+'Today'] = (stats[field+'Today'] || 0) + 1;
-  if (isMonth) stats[field+'Month'] = (stats[field+'Month'] || 0) + 1;
-}
-async function getUsage(env, user='') {
-  const cached = await readUsageCounter(env, user);
-  if (cached) return cached;
-  return {
-    ok: true,
-    timezone: 'Asia/Seoul',
-    asOf: new Date().toISOString(),
-    source: 'counter_empty',
-    note: 'AI usage counter data.',
-    me: emptyUsageStats(),
-    team: emptyUsageStats(),
-  };
-}
-
-
-//
-function configuredBytes(env, name, fallback) {
-  const raw = env?.[name];
-  if (!raw) return fallback;
-  const n = Number(String(raw).replace(/,/g, '').trim());
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-function storageCountLabel(r) {
-  return r.truncated ? `${r.count}+` : String(r.count);
-}
-async function countKVKeys(env, prefix, max = 1000) {
-  let cursor, count = 0, truncated = false;
-  do {
-    const page = await env.ENGR_KV.list({ prefix, cursor, limit: 100 });
-    const keys = page.keys || [];
-    count += keys.length;
-    cursor = page.cursor;
-    if (count >= max && cursor) { truncated = true; break; }
-  } while (cursor);
-  return { count, truncated };
-}
-async function kvSize(env, key) {
+// ── 자동 발송 스케줄 (app_settings digest_schedule) — cron은 30분마다 깨어나 이 설정과 대조한다 ──
+const DIGEST_SCHEDULE_DEFAULTS = { enabled: true, time: '08:30' };
+async function digestGetSchedule(env) {
   try {
-    const raw = await env.ENGR_KV.get(key);
-    return raw ? new TextEncoder().encode(raw).length : 0;
-  } catch (_) { return 0; }
+    const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key='digest_schedule'").first();
+    if (!r || !r.value) return { ...DIGEST_SCHEDULE_DEFAULTS };
+    const c = JSON.parse(r.value);
+    const time = /^([01]\d|2[0-3]):(00|30)$/.test(c.time || '') ? c.time : DIGEST_SCHEDULE_DEFAULTS.time;
+    return { enabled: c.enabled !== false, time, by: String(c.by || ''), at: Number(c.at || 0) };
+  } catch (_) { return { ...DIGEST_SCHEDULE_DEFAULTS }; }
 }
-async function estimatePrefixBytes(env, prefix, max = 1000, sampleSize = 5) {
-  let cursor, count = 0, truncated = false;
-  const sample = [];
-  do {
-    const page = await env.ENGR_KV.list({ prefix, cursor, limit: 100 });
-    const keys = page.keys || [];
-    for (const k of keys) {
-      count++;
-      if (sample.length < sampleSize) sample.push(k.name);
-      if (count >= max) break;
-    }
-    cursor = page.cursor;
-    if (count >= max && cursor) { truncated = true; break; }
-  } while (cursor);
-  let bytes = 0, sampled = 0;
-  for (const key of sample) {
-    const b = await kvSize(env, key);
-    if (b > 0) { bytes += b; sampled++; }
+async function digestSaveSchedule(env, cfg, by) {
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)").run();
+    const v = {
+      enabled: cfg.enabled !== false,
+      time: /^([01]\d|2[0-3]):(00|30)$/.test(cfg.time || '') ? cfg.time : DIGEST_SCHEDULE_DEFAULTS.time,
+      by: String(by || ''), at: Date.now()
+    };
+    await env.DB.prepare("INSERT INTO app_settings (key,value) VALUES ('digest_schedule',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(v)).run();
+    return v;
+  } catch (_) { return null; }
+}
+// 하루 1회 보장 — 이미 오늘 처리했으면 false. cron이 30분마다 깨어나므로 중복 실행 방지에 필수.
+async function claimDailyOnce(env, key, kstDay) {
+  try {
+    const r = await env.DB.prepare('SELECT value FROM app_settings WHERE key=?').bind(key).first();
+    if (r && r.value === kstDay) return false;
+    await env.DB.prepare('INSERT INTO app_settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(key, kstDay).run();
+    return true;
+  } catch (_) { return false; }   // D1 실패 시엔 보내지 않는다(중복 발송보다 미발송이 안전)
+}
+
+// 전송 목록을 웹훅으로 1건씩 발사 (Flow가 target/email 보고 DM 또는 채널 게시)
+async function pushPersonalDigests(env, sendList) {
+  let sent = 0, failed = 0; const errors = [];
+  if (!env.TEAMS_WEBHOOK_URL) return { sent, failed, errors, reason: 'no-webhook' };
+  for (const r of sendList) {
+    try {
+      const resp = await fetch(env.TEAMS_WEBHOOK_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'message', target: 'dm', assignee: r.assignee, userId: r.userId, email: r.email, testOf: r.testOf || '', attachments: r.attachments })
+      });
+      if (resp.ok) sent++;
+      else { failed++; if (errors.length < 3) errors.push({ to: r.assignee, status: resp.status, body: (await resp.text().catch(() => '')).slice(0, 300) }); }
+    } catch (e) { failed++; if (errors.length < 3) errors.push({ to: r.assignee, status: 0, body: String(e && e.message || e).slice(0, 300) }); }
   }
-  const avg = sampled ? bytes / sampled : 0;
-  return { count, truncated, bytes: Math.round(avg * count), estimated: true, sampled };
+  return { sent, failed, errors };
 }
-async function getStorageStats(env) {
-  const DEFAULT_KV_STORAGE_LIMIT_BYTES = 1024 * 1024 * 1024; // Cloudflare Workers KV default 1GB basis
-  const quotaBytes = configuredBytes(env, 'KV_STORAGE_LIMIT_BYTES', DEFAULT_KV_STORAGE_LIMIT_BYTES);
-  const quotaLabel = quotaBytes >= 1024 * 1024 * 1024
-    ? `${(quotaBytes / (1024 * 1024 * 1024)).toFixed(quotaBytes % (1024 * 1024 * 1024) ? 2 : 0)} GB`
-    : `${(quotaBytes / (1024 * 1024)).toFixed(0)} MB`;
 
-  const linksBytes = await kvSize(env, 'config:links');
-  const knowledgeBytes = await kvSize(env, 'config:knowledge');
-  const eosBytes = await kvSize(env, 'config:eos');
-  const adminsBytes = await kvSize(env, 'config:admins');
-  const audit = await estimatePrefixBytes(env, 'auditLatest:', 1000, 5);
-  const aiCache = await estimatePrefixBytes(env, 'ai:', 1000, 5);
-  const usage = await estimatePrefixBytes(env, 'usage:', 1000, 5);
-  const usageCounter = await readUsageCounter(env, '');
-  const aiToday = usageCounter?.team?.today || 0;
-  const aiMonth = usageCounter?.team?.month || 0;
-  const aiSuccessToday = usageCounter?.team?.successToday || 0;
-  const aiFailToday = usageCounter?.team?.failToday || 0;
-  const estimatedOldAiWritesToday = aiSuccessToday * 11 + aiFailToday * 8;
-  const estimatedNewAiWritesToday = aiSuccessToday * 3 + aiFailToday * 2;
-  const estimatedSavedWritesToday = Math.max(0, estimatedOldAiWritesToday - estimatedNewAiWritesToday);
-  const operationBudget = {
-    plan: 'Workers KV Free',
-    resetAtUtc: '00:00',
-    dailyLimits: { reads: 100000, writes: 1000, deletes: 1000, lists: 1000 },
-    aiToday,
-    aiMonth,
-    aiSuccessToday,
-    aiFailToday,
-    estimatedOldAiWritesToday,
-    estimatedNewAiWritesToday,
-    estimatedSavedWritesToday,
-    estimatedNewWritePct: estimatedNewAiWritesToday / 1000 * 100,
-    notes: [
-      'Operational usage note.',
-      'Operational usage note.',
-      'Operational usage note.',
-    ],
-    reductions: [
-      { item: 'audit log', before: 'multiple KV writes per event', after: 'one KV write per event' },
-      { item: 'AI usage counter', before: 'several usage get/put operations', after: 'one compact counter update' },
-      { item: 'AI audit log', before: 'request/success/failure logged separately', after: 'final outcome logged once' },
-    ],
-  };
+// 라이선스 망 값 정리 — 문자열 배열, 각 20자·최대 5개. 중복·공백 제거.
+function okNetworks(v) {
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const x of v) {
+    const s = String(x == null ? '' : x).trim().slice(0, 20);
+    if (s && !out.includes(s)) out.push(s);
+    if (out.length >= 5) break;
+  }
+  return out;
+}
+// ⚠️ 전사 채널 자동/수동 게시는 폐지(2026-08-07). TEAMS_WEBHOOK_URL은 이제 개인 DM flow를 가리키므로
+//    전사 다이제스트를 이 웹훅으로 보내면 팀 전체 업무가 한 사람 DM으로 쏟아진다. 개인 경로만 사용할 것.
 
-  const items = [
-    { label: 'Links', count: '1 JSON', bytes: linksBytes, note: 'config:links' },
-    { label: 'Knowledge', count: '1 JSON', bytes: knowledgeBytes, note: 'config:knowledge' },
-    { label: 'EOS/EOL', count: '1 JSON', bytes: eosBytes, note: 'config:eos' },
-    { label: 'Admin config', count: 'config', bytes: adminsBytes, note: 'admin list and basic settings' },
-    { label: 'Audit logs', count: storageCountLabel(audit), bytes: audit.bytes, estimated: true, note: `audit:* / 90d TTL / sampled ${audit.sampled}` },
-    { label: 'AI response cache', count: storageCountLabel(aiCache), bytes: aiCache.bytes, estimated: true, note: `ai:* / 7d TTL / sampled ${aiCache.sampled}` },
-    { label: 'AI usage counters', count: storageCountLabel(usage), bytes: usage.bytes, estimated: true, note: `usage:* / 400d TTL / sampled ${usage.sampled}` },
+// ══ 🧠 팀 퀴즈 헬퍼 (P1) ══
+function quizWeekId(ms) { const d = new Date(ms); d.setUTCHours(0, 0, 0, 0); d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7)); const ys = new Date(Date.UTC(d.getUTCFullYear(), 0, 1)); const wn = Math.ceil(((d - ys) / 86400000 + 1) / 7); return d.getUTCFullYear() + '-W' + String(wn).padStart(2, '0'); }
+function quizNorm(s) { return String(s == null ? '' : s).toLowerCase().replace(/[\s.,·\-_/()]+/g, ''); }
+function gradeQuiz(q, userAns) {
+  const ua = String(userAns == null ? '' : userAns).trim();
+  if (!ua) return { score: 0 };
+  if (q.type === 'mc' || q.type === 'ox') return { score: quizNorm(ua) === quizNorm(q.answer) ? 100 : 0 };
+  const nu = quizNorm(ua);
+  let accepts = []; try { accepts = JSON.parse(q.accepts || '[]'); } catch (_) {}
+  if ([q.answer, ...accepts].filter(Boolean).some(t => quizNorm(t) === nu)) return { score: 100 };
+  let kws = []; try { kws = JSON.parse(q.keywords || '[]'); } catch (_) {}
+  if (kws.length) { const hit = kws.filter(k => k && nu.includes(quizNorm(k))).length; return { score: Math.round(hit / kws.length * 100), note: `키워드 ${hit}/${kws.length}` }; }
+  const na = quizNorm(q.answer);
+  return { score: (na && (nu.includes(na) || na.includes(nu))) ? 60 : 0 };
+}
+// 출제 확정 시 Teams 오픈 알림 카드 (+지난주 TOP3) — TEAMS_WEBHOOK_URL 설정 시에만
+async function quizNotifyTeams(env, week, count, closesAt) {
+  if (!env.TEAMS_WEBHOOK_URL) return;
+  const tb = (text, opt) => Object.assign({ type: 'TextBlock', text, wrap: true }, opt || {});
+  const body = [
+    { type: 'Container', style: 'accent', bleed: true, items: [tb('🧠 이번 주 보안 퀴즈 오픈!', { weight: 'Bolder', size: 'Large' })] },
+    tb(`${week} · ${count}문제 · 마감 ${new Date(closesAt + 9 * 3600e3).toISOString().slice(5, 10).replace('-', '/')} — 제출 즉시 채점·XP 지급! ⚡`, { spacing: 'Small' })
   ];
-  const usedBytes = items.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0);
-  const itemCount = items.reduce((sum, item) => {
-    const n = Number(String(item.count || '').replace(/[^0-9]/g, ''));
-    return sum + (Number.isFinite(n) ? n : 0);
-  }, 0);
-  return {
-    ok: true,
-    asOf: new Date().toISOString(),
-    summary: {
-      quotaBytes,
-      quotaLabel,
-      usedBytes,
-      usedPct: quotaBytes ? usedBytes / quotaBytes * 100 : 0,
-      itemCount,
-      quotaNote: env.KV_STORAGE_LIMIT_BYTES ? 'Configured by KV_STORAGE_LIMIT_BYTES' : 'Cloudflare Workers KV default 1GB basis',
-      thresholds: { warnPct: 70, dangerPct: 90 },
-      operationBudget,
-    },
-    items,
-  };
-}
-
-async function readJsonKey(env, key, fallback = null) {
   try {
-    const raw = await env.ENGR_KV.get(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch (_) { return fallback; }
-}
-async function getPlainKey(env, key, fallback = '') {
-  try { return await env.ENGR_KV.get(key) || fallback; } catch (_) { return fallback; }
-}
-async function buildHubBackup(env, user) {
-  const generatedAt = new Date().toISOString();
-  return {
-    ok: true,
-    backupType: 'ENGR_HUB_CONFIG_BACKUP',
-    version: '1.4.4',
-    generatedAt,
-    generatedBy: user || '',
-    excludes: ['TEAM_PIN', 'JIRA_TOKEN', 'GEMINI_KEY', 'VT_KEY', 'Cloudflare Worker secrets/environment secrets'],
-    data: {
-      links: await readJsonKey(env, 'config:links', []),
-      knowledge: await readJsonKey(env, 'config:knowledge', []),
-      eos: await readJsonKey(env, 'config:eos', []),
-      admins: await readJsonKey(env, 'config:admins', { [SUPER_ADMIN]: 'super' }),
-      settings: {
-        rangeMonths: await getPlainKey(env, 'config:range_months', '3'),
-        sessionMin: await getPlainKey(env, 'config:session_min', '120'),
-        eosWarnDays: await getPlainKey(env, 'config:eos_warn_days', '60,30,7'),
-        aiSystem: await getPlainKey(env, 'config:ai_system', ''),
-      },
-    },
-  };
-}
-function auditTimestampFromKey(name) {
-  if (name.startsWith('audit:')) {
-    const n = Number(name.split(':')[1]);
-    return Number.isFinite(n) ? n : 0;
-  }
-  if (name.startsWith('auditLatest:')) {
-    const rev = Number(name.split(':')[1]);
-    return Number.isFinite(rev) ? 9999999999999 - rev : 0;
-  }
-  if (name.startsWith('auditType:')) {
-    const parts = name.split(':');
-    const rev = Number(parts[2]);
-    return Number.isFinite(rev) ? 9999999999999 - rev : 0;
-  }
-  return 0;
-}
-async function cleanupOldAudit(env, days = 90, dryRun = true, max = 500) {
-  const cutoff = Date.now() - Math.max(1, Number(days) || 90) * 24 * 60 * 60 * 1000;
-  const prefixes = ['audit:', 'auditLatest:', 'auditType:'];
-  let scanned = 0, matched = 0, deleted = 0, truncated = false;
-  for (const prefix of prefixes) {
-    let cursor;
-    do {
-      const page = await env.ENGR_KV.list({ prefix, cursor, limit: 100 });
-      for (const key of page.keys || []) {
-        scanned++;
-        const ts = auditTimestampFromKey(key.name);
-        if (ts && ts < cutoff) {
-          matched++;
-          if (!dryRun) { await env.ENGR_KV.delete(key.name); deleted++; }
-        }
-        if (scanned >= max) { truncated = !!(page.cursor || prefix !== prefixes[prefixes.length - 1]); break; }
-      }
-      cursor = page.cursor;
-      if (scanned >= max) break;
-    } while (cursor);
-    if (scanned >= max) break;
-  }
-  return { ok: true, target: 'audit-old', days, dryRun, scanned, matched, deleted, truncated, cutoff: new Date(cutoff).toISOString() };
-}
-async function deleteKvPrefix(env, prefix, max = 1000) {
-  let cursor, deleted = 0, truncated = false;
-  do {
-    const page = await env.ENGR_KV.list({ prefix, cursor, limit: 100 });
-    for (const key of page.keys || []) {
-      await env.ENGR_KV.delete(key.name);
-      deleted++;
-      if (deleted >= max) break;
+    const prevWeek = quizWeekId(Date.now() + 9 * 3600e3 - 7 * 86400000);
+    const r = await env.DB.prepare("SELECT user, AVG(score) AS acc, SUM(xp) AS wxp FROM quiz_answer WHERE week=? GROUP BY user ORDER BY acc DESC LIMIT 3").bind(prevWeek).all();
+    const tops = (r.results || []);
+    if (tops.length) {
+      const it = [tb('🏆 지난 주 TOP', { weight: 'Bolder', color: 'Good' })];
+      tops.forEach((t, i) => it.push(tb(`${['🥇', '🥈', '🥉'][i]} ${t.user} — ${Math.round(t.acc)}점 · +${t.wxp || 0} XP`, { spacing: 'Small' })));
+      body.push({ type: 'Container', style: 'good', spacing: 'Medium', items: it });
     }
-    cursor = page.cursor;
-    if (deleted >= max && cursor) { truncated = true; break; }
-  } while (cursor);
-  return { deleted, truncated };
+  } catch (_) {}
+  const card = { type: 'AdaptiveCard', $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', version: '1.4', body, actions: [{ type: 'Action.OpenUrl', title: '🚀 지금 도전하기', url: 'https://engr-jira.github.io/engr-hub-dev/?go=quiz' }], msteams: { width: 'Full' } };
+  try { await fetch(env.TEAMS_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] }) }); } catch (_) {}
 }
-async function resetHubData(env) {
-  const fixedKeys = ['config:links','links','config:knowledge','config:eos','vt:history','config:last_jira_sync'];
-  let deleted = 0, truncated = false;
-  for (const key of fixedKeys) {
-    try { await env.ENGR_KV.delete(key); deleted++; } catch (_) {}
-  }
-  for (const prefix of ['private:','ai:','usage:','audit:','auditLatest:','auditType:']) {
-    const r = await deleteKvPrefix(env, prefix, 1000);
-    deleted += r.deleted;
-    truncated = truncated || r.truncated;
-  }
-  return { ok: true, deleted, truncated };
+async function quizEnsureTables(env) {
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS quiz_question (id INTEGER PRIMARY KEY AUTOINCREMENT, product TEXT, type TEXT, difficulty INTEGER DEFAULT 1, question TEXT, choices TEXT, answer TEXT, accepts TEXT, keywords TEXT, explanation TEXT, source TEXT, tags TEXT, status TEXT DEFAULT 'draft', created_by TEXT, created_at INTEGER, updated_at INTEGER)").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS quiz_week (week TEXT PRIMARY KEY, question_ids TEXT, opens_at INTEGER, closes_at INTEGER, published_by TEXT, published_at INTEGER)").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS quiz_answer (week TEXT, user TEXT, question_id INTEGER, answer TEXT, score REAL, graded_by TEXT, note TEXT, submitted_at INTEGER, PRIMARY KEY (week, user, question_id))").run();
+  try { await env.DB.prepare('ALTER TABLE quiz_question ADD COLUMN credit TEXT').run(); } catch (_) {}
+  try { await env.DB.prepare('ALTER TABLE quiz_answer ADD COLUMN xp INTEGER').run(); } catch (_) {}
 }
-
-// ════════════════ Web Push (VAPID, payload-less + SW pending fetch) ════════════════
-// 이벤트 등록 시 구독자에게 OS 알림. 본인(actor) 제외 · 사용자 opt-out · 관리자 기능별 on/off · 대상 지정 · 멘트 템플릿.
-const PUSH_EVENTS = {
-  link:      { label: '업무 링크 등록',    defTitle: '🔗 새 업무 링크',     defBody: "{user}님이 '{target}' 등록", page: 'links' },
-  knowledge: { label: '팀 노하우 등록',    defTitle: '📚 새 팀 노하우',     defBody: "{user}님이 '{target}' 등록", page: 'knowledge' },
-  eos:       { label: '라이선스 등록', defTitle: '⏳ 라이선스 등록', defBody: "{user}님이 '{target}' 등록", page: 'eos' },
+// 게임화: 난이도별 XP(만점 기준 10/20/30, 부분점수 비례) · 레벨 티어 · 게임마스터 멘트(quiz_settings로 편집 가능)
+const QUIZ_XP_BY_DIFF = { 1: 10, 2: 20, 3: 30 };
+const QUIZ_DEFAULT_SETTINGS = {
+  levels: [{ xp: 0, name: '🥉 새싹', }, { xp: 100, name: '🥈 견습' }, { xp: 300, name: '🥇 숙련' }, { xp: 700, name: '💎 마스터' }, { xp: 1500, name: '👑 전설' }],
+  msgs: { perfect: '💯 퍼펙트! 오늘 최고의 플레이!', great: '🔥 대단해요! 거의 다 맞혔어요', good: '😎 좋아요! 조금만 더!', tryagain: '💪 아쉽! 해설 보고 다음 주에 설욕전', combo: '🔥 {n}연속 정답!' },
+  intro: '🧠 이번 주 보안 퀴즈 — 실전에서 바로 쓰는 지식!',
+  prize: '', teamGoal: 0, teamGoalPrize: ''
 };
-function u8ToB64url(u){ let s=''; for(let i=0;i<u.length;i++)s+=String.fromCharCode(u[i]); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
-async function vapidAuthHeader(env, audience){
-  const jwkRaw = env.VAPID_PRIVATE_JWK, pub = env.VAPID_PUBLIC_KEY, sub = env.VAPID_SUBJECT || 'mailto:admin@example.com';
-  if(!jwkRaw || !pub) throw new Error('VAPID not configured');
-  const jwk = typeof jwkRaw === 'string' ? JSON.parse(jwkRaw) : jwkRaw;
-  const key = await crypto.subtle.importKey('jwk', { kty:'EC', crv:'P-256', d:jwk.d, x:jwk.x, y:jwk.y, ext:true }, { name:'ECDSA', namedCurve:'P-256' }, false, ['sign']);
-  const enc = new TextEncoder();
-  const header = u8ToB64url(enc.encode(JSON.stringify({ typ:'JWT', alg:'ES256' })));
-  const payload = u8ToB64url(enc.encode(JSON.stringify({ aud:audience, exp:Math.floor(Date.now()/1000)+12*3600, sub })));
-  const signingInput = `${header}.${payload}`;
-  const sig = await crypto.subtle.sign({ name:'ECDSA', hash:'SHA-256' }, key, enc.encode(signingInput));
-  return { Authorization:`vapid t=${signingInput}.${u8ToB64url(new Uint8Array(sig))}, k=${pub}` };
+async function quizGetSettings(env) {
+  try { const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key='quiz_settings'").first(); if (r && r.value) return Object.assign({}, QUIZ_DEFAULT_SETTINGS, JSON.parse(r.value)); } catch (_) {}
+  return QUIZ_DEFAULT_SETTINGS;
 }
-async function sendWebPush(env, sub, ttl=86400){
-  const u = new URL(sub.endpoint);
-  const auth = await vapidAuthHeader(env, `${u.protocol}//${u.host}`);
-  const res = await fetch(sub.endpoint, { method:'POST', headers:{ ...auth, TTL:String(ttl) } });
-  return res.status; // 201=ok, 404/410=만료(구독 제거)
-}
-async function getPushSubs(env){ try{ const r=await env.ENGR_KV.get('push:subs'); return r?JSON.parse(r):{}; }catch(_){ return {}; } }
-async function savePushSubs(env, s){ await env.ENGR_KV.put('push:subs', JSON.stringify(s)); }
-async function getPushSettings(env){
-  let s={}; try{ const r=await env.ENGR_KV.get('push:settings'); if(r)s=JSON.parse(r); }catch(_){}
-  const events={};
-  for(const [k,def] of Object.entries(PUSH_EVENTS)){
-    const e=(s.events&&s.events[k])||{};
-    let title=(e.title||def.defTitle), body=(e.body||def.defBody);
-    // 옛 'EOS/라이선스' 문구 자가 치환(저장된 멘트 마이그레이션)
-    title=title.replace(/EOS\s*\/\s*라이선스/g,'라이선스'); body=body.replace(/EOS\s*\/\s*라이선스/g,'라이선스');
-    events[k]={ enabled:e.enabled!==false, title, body, label:def.label };
-  }
-  return { events, include:Array.isArray(s.include)?s.include:[], exclude:Array.isArray(s.exclude)?s.exclude:[] };
-}
-function fillTemplate(tpl, vars){ return String(tpl||'').replace(/\{(\w+)\}/g,(m,k)=> vars[k]!==undefined?vars[k]:m); }
-async function endpointHash(endpoint){ const b=await crypto.subtle.digest('SHA-256', new TextEncoder().encode(endpoint)); return u8ToB64url(new Uint8Array(b)).slice(0,40); }
-async function enqueuePending(env, endpoint, payload){
-  const pk='push:pending:'+await endpointHash(endpoint);
-  let pend=[]; try{ const r=await env.ENGR_KV.get(pk); if(r)pend=JSON.parse(r); }catch(_){}
-  pend.push(payload); if(pend.length>30)pend=pend.slice(-30);
-  await env.ENGR_KV.put(pk, JSON.stringify(pend), { expirationTtl:60*60*24*7 });
-}
-async function pushNotify(env, eventKey, actorId, vars){
-  try{
-    const def=PUSH_EVENTS[eventKey]; if(!def)return;
-    const settings=await getPushSettings(env);
-    const ev=settings.events[eventKey];
-    if(!ev || !ev.enabled) return;
-    const subs=await getPushSubs(env);
-    const actorNorm=normalizeUserId(actorId||'');
-    const include=settings.include.map(normalizeUserId).filter(Boolean);
-    const exclude=settings.exclude.map(normalizeUserId).filter(Boolean);
-    let recipients=Object.keys(subs);
-    if(include.length) recipients=recipients.filter(u=>include.includes(u));
-    recipients=recipients.filter(u=> !exclude.includes(u) && u!==actorNorm);
-    if(!recipients.length) return;
-    let users={}; try{ users=await getUsers(env); }catch(_){}
-    const actorName=(users[actorNorm]&&users[actorNorm].displayName)||actorId||'팀원';
-    const fullVars={ user:actorName, event:def.label, ...vars };
-    const payload={ title:fillTemplate(ev.title,fullVars), body:fillTemplate(ev.body,fullVars), page:def.page, ts:Date.now(), tag:eventKey };
-    let changed=false;
-    for(const uid of recipients){
-      let pref={}; try{ const pr=await env.ENGR_KV.get('push:pref:'+uid); if(pr)pref=JSON.parse(pr); }catch(_){}
-      if(pref.enabled===false) continue;
-      const list=subs[uid]||[];
-      for(const s of list){
-        try{ await enqueuePending(env, s.endpoint, payload); }catch(_){}
-        try{ const st=await sendWebPush(env, s); if(st===404||st===410){ subs[uid]=(subs[uid]||[]).filter(x=>x.endpoint!==s.endpoint); changed=true; } }catch(_){}
-      }
-      if(subs[uid] && !subs[uid].length){ delete subs[uid]; changed=true; }
-    }
-    if(changed) await savePushSubs(env, subs);
-  }catch(_){}
-}
-
-// ════════════ Phase 0 · D1 foundation (feat/hub-d1-foundation) — spec §C/§B ════════════
-// 커스텀 JQL Jira 검색 (자격증명 서버측 = mj.park 토큰, 클라 노출 0)
-async function jiraSearchJql(env, jql, fields, maxPages = 8) {
-  if (!env.JIRA_TOKEN) throw new Error('JIRA_TOKEN 미설정');
-  const headers = { 'Authorization': 'Basic ' + btoa('mj.park@escare.co.kr:' + env.JIRA_TOKEN), 'Content-Type': 'application/json', 'Accept': 'application/json' };
-  let all = [], token, pages = 0;
-  do {
-    const body = { jql, maxResults: 100, fieldsByKeys: false, fields };
-    if (token) body.nextPageToken = token;
-    const res = await fetch('https://escare-engr.atlassian.net/rest/api/3/search/jql', { method: 'POST', headers, body: JSON.stringify(body) });
-    if (!res.ok) throw new Error('Jira ' + res.status + ': ' + (await res.text()).slice(0, 160));
-    const page = await res.json();
-    all = all.concat(page.issues || []);
-    token = page.nextPageToken; pages++;
-  } while (token && pages < maxPages);
-  return all;
-}
-// 브래킷 분류(§B): customer / vendorcase / unclassified / internal / none
-function extractBracket(s) { const m = /^\s*\[([^\]]+)\]/.exec(s || ''); return m ? m[1].trim() : ''; }
-const INTERNAL_TAGS = ['hands-on', 'handson', 'hands on', 'none', 'null', 'n/a', 'na', 'test', '테스트', '내부', '검토', '긴급', 'urgent', 'poc'];
-function classifyBracket(summary, custList) {
-  // L-16: 프론트 extractCustomer와 동일하게 제목 내 '모든' 브래킷을 스캔(선두 숫자 케이스번호 등 건너뜀)
-  const brackets = (String(summary || '').match(/\[([^\]]+)\]/g) || []).map(m => m.slice(1, -1).trim()).filter(Boolean);
-  if (!brackets.length) return { kind: 'none', bracket: '' };
-  for (const b of brackets) { for (const c of custList) { if (c.name === b || (c.aliases || []).includes(b)) return { kind: 'customer', bracket: b, customer: c.name }; } }  // M-5: 등록 고객사/별칭 우선
-  // 고객사 후보 = 숫자(케이스번호)·내부태그 아닌 첫 브래킷 (프론트와 일치)
-  const cand = brackets.find(b => !/^\d+$/.test(b) && !INTERNAL_TAGS.includes(b.toLowerCase()));
-  if (cand) {
-    if (/^[A-Z]{2,3}\d+$/i.test(cand) || /^hands[\s-]?on$/i.test(cand)) return { kind: 'vendorcase', bracket: cand };
-    if (/[가-힣]/.test(cand)) return { kind: 'customer', bracket: cand, customer: cand };   // 한글 = 고객사(MJ 요청)
-    return { kind: 'unclassified', bracket: cand };   // H-3: 미등록·비한글 모호 → ⚑ 검토 필요
-  }
-  const first = brackets[0];   // 전부 숫자/내부태그
-  if (INTERNAL_TAGS.includes(first.toLowerCase())) return { kind: 'internal', bracket: first };
-  return { kind: 'vendorcase', bracket: first };   // 숫자 케이스번호 등
-}
-async function getCustomersD1(env) {
-  try { const r = await env.DB.prepare('SELECT name, aliases FROM customers WHERE active=1').all(); return (r.results || []).map(c => ({ name: c.name, aliases: (() => { try { return JSON.parse(c.aliases || '[]'); } catch { return []; } })() })); }
-  catch (_) { return []; }
-}
-async function getMonitorAllowlist(env) {
-  try { const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key='monitor_allowlist'").first(); if (r && r.value) return JSON.parse(r.value); } catch (_) {}
-  return ['mj.park'];
-}
-async function isMonitorAllowed(env, user) { const list = await getMonitorAllowlist(env); return list.map(normalizeUserId).includes(normalizeUserId(user)); }
-async function getFeatureFlags(env) {
-  const def = { compat: true, history: true, monitor: true, nsis: true };
-  try { const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key='feature_flags'").first(); if (r && r.value) return { ...def, ...JSON.parse(r.value) }; } catch (_) {}
-  return def;
-}
-async function getAuditReadD1(env) {
-  try { const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key='audit_read_d1'").first(); return r?.value === 'on'; } catch (_) { return false; }
-}
-function jqlEsc(s) { return String(s).replace(/[\r\n]+/g, ' ').replace(/["\\]/g, '\\$&'); }
-function jqlTextEsc(s) { return jqlEsc(String(s).replace(/[*?~^:"]/g, ' ')); }  // L-14: text ~ 우변(Lucene) 메타문자 제거 → 비균형 와일드카드 Jira 400 방지
-function okDate(s) { s = String(s == null ? '' : s).trim(); return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : ''; }  // M-7: 날짜 형식 검증(아니면 빈값) — XSS 근원 차단 + 정렬 NaN 방지
-function nextDayStr(d) { const dt = new Date(d + 'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate() + 1); return dt.toISOString().slice(0, 10); }
-const TEAM_FIELDS = ['summary', 'status', 'assignee', 'reporter', 'labels', 'issuetype', 'created', 'updated', 'duedate', 'customfield_10134'];
-function mapJiraIssue(it, custList) {
-  const f = it.fields || {};
-  return { key: it.key, summary: f.summary || '', status: f.status?.name || '', assignee: f.assignee?.displayName || '-', labels: f.labels || [], type: f.issuetype?.subtask ? 'subtask' : 'task', created: f.created || '', updated: f.updated || '', duedate: f.duedate || '', cls: classifyBracket(f.summary, custList) };
-}
-async function buildDailySnapshot(env, day) {
+function quizLevelOf(xp, levels) { let cur = levels[0], next = null; for (const l of levels) { if (xp >= l.xp) cur = l; else { next = l; break; } } return { name: cur.name, next: next ? { name: next.name, need: next.xp - xp } : null }; }
+function quizMsgFor(avg, msgs) { return avg >= 100 ? msgs.perfect : avg >= 80 ? msgs.great : avg >= 50 ? msgs.good : msgs.tryagain; }
+async function quizBadges(env, user) {
+  const badges = [];
   try {
-    const jql = `project = ENGR AND updated >= "${day}" AND updated < "${nextDayStr(day)}" ORDER BY updated DESC`;
-    const issues = await jiraSearchJql(env, jql, TEAM_FIELDS, 12);
-    const custList = await getCustomersD1(env);
-    const items = issues.map(it => mapJiraIssue(it, custList));
-    const payload = { day, count: items.length, items };
-    const built_at = new Date().toISOString();
-    try { await env.DB.prepare("INSERT INTO team_daily_snapshot (day,payload_json,built_at) VALUES (?,?,?) ON CONFLICT(day) DO UPDATE SET payload_json=excluded.payload_json, built_at=excluded.built_at").bind(day, JSON.stringify(payload), built_at).run(); } catch (_) {}
-    return { ...payload, built_at };
-  } catch (e) {  // L-21: cron 스냅샷 실패가 조용히 묻히지 않게 감사 기록(관측성)
-    try { await auditLog(env, 'system', 'MON_SNAPSHOT_FAIL', { monType: 'snapshot', day, error: String((e && e.message) || e).slice(0, 200) }); } catch (_) {}
-    return { day, count: 0, items: [], error: String((e && e.message) || e) };
-  }
+    const rows = (await env.DB.prepare("SELECT a.week, a.score, q.product, q.difficulty FROM quiz_answer a LEFT JOIN quiz_question q ON q.id=a.question_id WHERE a.user=?").bind(user).all()).results || [];
+    const byWeek = {}; rows.forEach(r => { (byWeek[r.week] = byWeek[r.week] || []).push(r); });
+    const weeks = Object.keys(byWeek).sort();
+    if (weeks.some(w => byWeek[w].length >= 5 && byWeek[w].every(r => r.score === 100))) badges.push('💯 퍼펙트 위크');
+    // 제품 마스터: 해당 제품 10문제 이상 & 평균 90+
+    const byProd = {}; rows.forEach(r => { if (!r.product) return; (byProd[r.product] = byProd[r.product] || []).push(r.score); });
+    for (const [p, arr] of Object.entries(byProd)) { if (arr.length >= 10 && arr.reduce((s, x) => s + x, 0) / arr.length >= 90) badges.push(`🎯 ${p} 마스터`); }
+    // 스트릭: 최근 주부터 역방향 연속 참여 주 수
+    let streak = 0; if (weeks.length) { const now = Date.now(); for (let i = 0; ; i++) { const wid = quizWeekId(now + 9 * 3600e3 - i * 7 * 86400000); if (byWeek[wid]) streak++; else if (i === 0) continue; else break; if (i > 60) break; } }
+    if (streak >= 3) badges.push(`🔥 ${streak}주 연속`);
+    return { badges, streak };
+  } catch (_) { return { badges, streak: 0 }; }
 }
 
-//
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: getCorsHeaders(request) });
@@ -1414,20 +491,30 @@ export default {
     const hasSession = !!sessionUser && (!headerUser || headerUser === sessionUser);
     const user = sessionUser || headerUser;
 
+    // ── 영업 역할 화이트리스트 강제 (라우팅 이전) ──
+    // 클라이언트에서 메뉴를 숨기는 것만으로는 API가 그대로 열리므로 서버에서 차단한다.
+    if (hasSession && await isSalesRole(env, user)) {
+      if (!salesPathAllowed(path, request.method)) {
+        ctx.waitUntil(auditLog(env, user, 'SALES_DENY', { denyPath: path, denyMethod: request.method }));
+        return corsResponse({ ok: false, message: '접근 권한이 없습니다.' }, 403);
+      }
+    }
+
     try {
       //
-      if (path === '/debug') {
-        return corsResponse({ ok: true, ts: new Date().toISOString(), worker: 'engr-hub-proxy', model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' });
+      // 고객사 정식명·별칭 (D1 customers) — 프론트 별칭 정규화용
+      if (path === '/customers' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        let items = [];
+        try {
+          const r = await env.DB.prepare('SELECT name, aliases FROM customers WHERE active=1').all();
+          items = (r.results || []).map(x => { let a = []; try { a = JSON.parse(x.aliases || '[]'); } catch (_) {} return { name: x.name, aliases: a }; });
+        } catch (_) {}
+        return corsResponse({ ok: true, items });
       }
 
       //
-      if (path === '/debug/ai') {
-        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
-        if (!await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 사용할 수 있습니다.' }, 403);
-        const result = await callAI(env, 'Reply with test success in Korean.', 'debug');
-        await auditLog(env, user, 'AI_DEBUG', { path: '/debug/ai' });
-        return corsResponse({ ok: true, text: result?.candidates?.[0]?.content?.parts?.[0]?.text });
-      }
+      
 
       //
       if (path === '/auth/session' && request.method === 'GET') {
@@ -1513,23 +600,15 @@ export default {
         const rangeRaw = await env.ENGR_KV.get('config:range_months') || await env.ENGR_KV.get('config:jira_range_months');
         let lastSync = null;
         try { const raw = await env.ENGR_KV.get('config:last_jira_sync'); if (raw) lastSync = JSON.parse(raw); } catch (_) {}
-        const geminiOn = !!(env.GEMINI_API_KEY || env.GEMINI_KEY);
-        const aiProvider = geminiOn ? 'gemini' : 'llama';
-        const aiModel = geminiOn ? (env.GEMINI_MODEL || 'gemini-2.5-flash') : 'llama-3.3-70b';
-        return corsResponse({ sessionMin: parseInt(sessionRaw || '120') || 120, rangeMonths: parseInt(rangeRaw || '6') || 6, lastSync, aiProvider, aiModel });
+        return corsResponse({ sessionMin: parseInt(sessionRaw || '120') || 120, rangeMonths: parseInt(rangeRaw || '6') || 6, lastSync });
       }
-      if (path === '/kv/usage' && request.method === 'GET') {
-        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 접근할 수 있습니다.' }, 403);
-        return corsResponse(await getUsage(env, user));
-      }
+      
       // 일반 유저용 개인 AI 사용량 (팀 통계 미포함)
-      if (path === '/kv/usage/me' && request.method === 'GET') {
-        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
-        const usage = await getUsage(env, user);
-        return corsResponse({ ok: true, me: usage.me, asOf: usage.asOf, timezone: usage.timezone, source: usage.source });
-      }
+      
       if (path === '/links/kb/import' && request.method === 'POST') {
-        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: 'Forbidden' }, 403);
+        // 관리자 세션 또는 분석 토큰(초기 대량 수집·증분 트리거)
+        const anaOkK = !!env.ANALYSIS_WRITE_TOKEN && (request.headers.get('x-analysis-token') || '') === env.ANALYSIS_WRITE_TOKEN;
+        if (!anaOkK && (!hasSession || !await isAdmin(env, user))) return corsResponse({ ok: false, message: 'Forbidden' }, 403);
         const years = Math.max(1, Math.min(10, parseInt(url.searchParams.get('years') || '5', 10) || 5));
         const limit = Math.max(1, Math.min(50, parseInt(url.searchParams.get('limit') || '20', 10) || 20));
         const cursor = url.searchParams.get('cursor') || '';
@@ -1538,11 +617,35 @@ export default {
       }
 
       //
+      // ── 스케줄 엔진용 Jira 첨부 프록시 (분석 토큰 인증) : 첨부 로그 분석의 통로 ──
+      // 일반 /jira/ 봉인보다 먼저 매칭되어야 함. 5MB 상한(로그 텍스트 위주).
+      if (path.startsWith('/jira/attach/') && request.method === 'GET') {
+        const tok = request.headers.get('x-analysis-token') || '';
+        if (!env.ANALYSIS_WRITE_TOKEN || tok !== env.ANALYSIS_WRITE_TOKEN) return corsResponse({ ok: false, message: '인증 실패' }, 401);
+        const attId = path.split('/')[3] || '';
+        if (!/^\d+$/.test(attId)) return corsResponse({ ok: false, message: '잘못된 첨부 ID' }, 400);
+        const jiraAuth = 'Basic ' + btoa('mj.park@escare.co.kr:' + env.JIRA_TOKEN);
+        const jr = await fetch(`https://escare-engr.atlassian.net/rest/api/3/attachment/content/${attId}`, { headers: { 'Authorization': jiraAuth } });
+        if (!jr.ok) return corsResponse({ ok: false, message: '첨부 조회 실패 ' + jr.status }, 502);
+        const buf = await jr.arrayBuffer();
+        if (buf.byteLength > 30 * 1024 * 1024) return corsResponse({ ok: false, message: '30MB 초과 첨부는 분석 제외' }, 413);
+        return new Response(buf, { status: 200, headers: { ...CORS_HEADERS, 'Content-Type': jr.headers.get('Content-Type') || 'application/octet-stream' } });
+      }
       if (path.startsWith('/jira/')) {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         const jiraPath = path.replace('/jira/', '');
         if (jiraPath === 'search' || jiraPath === 'search/jql') {
           return await handleJiraSearch(env, user);
+        }
+        // ── 프록시 봉인: 프론트가 실제로 쓰는 GET issue/{KEY} 만 허용 ──
+        // (이전엔 전 메서드·임의 경로가 mj.park 인증으로 통과 → Jira 임의 읽기/쓰기 가능했음)
+        if (request.method !== 'GET') {
+          ctx.waitUntil(auditLog(env, user, 'JIRA_PROXY_DENY', { jiraPath, denyMethod: request.method }));
+          return corsResponse({ ok: false, message: '허용되지 않은 메서드입니다.' }, 405);
+        }
+        if (!/^issue\/[A-Z][A-Z0-9]*-\d+$/.test(jiraPath)) {
+          ctx.waitUntil(auditLog(env, user, 'JIRA_PROXY_DENY', { jiraPath, denyMethod: 'GET' }));
+          return corsResponse({ ok: false, message: '허용되지 않은 경로입니다.' }, 403);
         }
         const jiraAuth = 'Basic ' + btoa('mj.park@escare.co.kr:' + env.JIRA_TOKEN);
         const jiraUrl = `https://escare-engr.atlassian.net/rest/api/3/${jiraPath}${url.search}`;
@@ -1556,41 +659,7 @@ export default {
       }
 
       //
-      if (path === '/ai/generate' && request.method === 'POST') {
-        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
-        const body = await request.json().catch(() => ({}));
-        const { contents, mode = 'technical_analysis' } = body;
-        let detail = (body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)) ? body.detail : {};
-        try { if (JSON.stringify(detail).length > 1000) detail = { _truncated: true }; } catch (_) { detail = {}; }  // L-31: detail 크기 캡(감사로그/D1 비대화 방지)
-        const prompt = contents?.[0]?.parts?.[0]?.text;
-        if (!prompt) return corsResponse({ ok: false, message: '\uD504\uB86C\uD504\uD2B8\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.' }, 400);
-
-        // AI daily rate limit check
-        const AI_DAILY_LIMIT = parseInt(env.AI_DAILY_LIMIT || '300', 10);
-        const AI_USER_DAILY_LIMIT = parseInt(env.AI_USER_DAILY_LIMIT || '80', 10);
-        try {
-          const usageNow = await readUsageCounter(env, user);
-          if ((usageNow?.team?.today || 0) >= AI_DAILY_LIMIT) {
-            return corsResponse({ ok: false, message: `\ud300 \uc77c\uc77c AI \uc694\uccad \ud55c\ub3c4(${AI_DAILY_LIMIT}\ud68c)\uc5d0 \ub3c4\ub2ec\ud588\uc2b5\uB2C8\uB2E4.` }, 429);
-          }
-          if ((usageNow?.me?.today || 0) >= AI_USER_DAILY_LIMIT) {
-            return corsResponse({ ok: false, message: `\uac1c\uc778 \uc77c\uc77c AI \uc694\uccad \ud55c\ub3c4(${AI_USER_DAILY_LIMIT}\ud68c)\uc5d0 \ub3c4\ub2ec\ud588\uc2b5\uB2C8\uB2E4.` }, 429);
-          }
-        } catch (_) {}
-
-        const reqId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
-        try {
-          const safeMode = normalizeAIMode(mode);
-          const result = await callAI(env, prompt, safeMode);
-          const outcome = result._cached ? 'cached' : 'success';
-          await auditLog(env, user, 'AI_CALL', { ...detail, reqId, mode: safeMode, promptLen: prompt.length, outcome, model: result._model });  // M-9: 클라 detail을 앞에 두어 서버 계산값이 항상 우선(감사 위조 방지)
-          await updateAIUsage(env, user, outcome, result._model);
-          return corsResponse(result);
-        } catch (e) {
-          await updateAIUsage(env, user, 'fail');
-          return corsResponse({ ok: false, message: e.message || 'AI \uD638\uCD9C \uC2E4\uD328' }, 502);
-        }
-      }
+      
 
       // VT \uBA40\uD2F0 \uD0C0\uC785 \uC870\uD68C (\uD574\uC2DC/IP/\uB3C4\uBA54\uC778/URL)
       if (path === '/vt/lookup' && request.method === 'POST') {
@@ -1685,7 +754,7 @@ export default {
           try {
             const q = filter
               ? env.DB.prepare('SELECT ts,ts_num,user,type,detail_json FROM audit_log WHERE type=? ORDER BY ts_num DESC LIMIT ?').bind(filter, limit)
-              : env.DB.prepare('SELECT ts,ts_num,user,type,detail_json FROM audit_log ORDER BY ts_num DESC LIMIT ?').bind(limit);
+              : env.DB.prepare("SELECT ts,ts_num,user,type,detail_json FROM audit_log WHERE type != 'PAGE_VIEW' ORDER BY ts_num DESC LIMIT ?").bind(limit);
             const r = await q.all();
             const rows = r.results || [];
             if (rows.length) {
@@ -1710,10 +779,39 @@ export default {
           if (!val) continue;
           try {
             const item = JSON.parse(val);
+            if (!filter && item.type === 'PAGE_VIEW') continue;
             if (!filter || item.type === filter) logs.push(item);
           } catch (_) {}
         }
         return corsResponse(logs);
+      }
+
+      // ── 기능 사용 현황 집계(관리자) : D1 audit_log GROUP BY. 컷 판단용. 읽기전용 ──
+      if (path === '/admin/usage/features' && request.method === 'GET') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 접근할 수 있습니다.' }, 403);
+        const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '90', 10) || 90));
+        const since = Date.now() - days * 86400000;
+        try {
+          const byTypeQ = await env.DB.prepare("SELECT type, COUNT(*) AS cnt, MAX(ts_num) AS last, COUNT(DISTINCT user) AS uu FROM audit_log WHERE ts_num >= ? GROUP BY type").bind(since).all();
+          const byPageQ = await env.DB.prepare("SELECT json_extract(detail_json,'$.page') AS page, COUNT(*) AS cnt, MAX(ts_num) AS last, COUNT(DISTINCT user) AS uu FROM audit_log WHERE type='PAGE_VIEW' AND ts_num >= ? GROUP BY page").bind(since).all();
+          let coverageStart = null; try { const c = await env.DB.prepare("SELECT MIN(ts_num) AS first FROM audit_log").first(); coverageStart = (c && c.first) ? c.first : null; } catch (_) {}
+          return corsResponse({
+            ok: true, days, since, coverageStart,
+            byType: (byTypeQ.results || []).map(r => ({ type: r.type, count: r.cnt, last: r.last, users: r.uu })),
+            byPage: (byPageQ.results || []).filter(r => r.page).map(r => ({ page: r.page, count: r.cnt, last: r.last, users: r.uu }))
+          });
+        } catch (e) { return corsResponse({ ok: false, message: '집계 실패: ' + (e && e.message || e) }, 500); }
+      }
+
+      // ── 페이지 방문 비콘(로그인 사용자) : 열람형 기능 사용 측정. 세션당 페이지 1회(클라 스로틀). 감사 기본뷰에선 제외됨 ──
+      if (path === '/usage/pageview' && request.method === 'POST') {
+        if (!hasSession) return corsResponse({ ok: false }, 401);
+        const body = await request.json().catch(() => ({}));
+        const ALLOWED = ['dash', 'issues', 'cases', 'customers', 'eos', 'vt', 'links', 'knowledge', 'audit', 'settings', 'mydesk', 'compat', 'monitor', 'sales', 'owners', 'quiz', 'nsischk'];
+        const pv = ALLOWED.includes(body.page) ? body.page : null;
+        if (!pv) return corsResponse({ ok: false }, 400);
+        ctx.waitUntil(auditLog(env, user, 'PAGE_VIEW', { page: pv }));
+        return corsResponse({ ok: true });
       }
 
       // ── §H 감사로그 KV→D1 마이그레이션 (슈퍼) ──
@@ -1781,11 +879,14 @@ export default {
           if (String(body.initialPin).length < 6) return corsResponse({ ok: false, message: '\uCD08\uAE30 PIN\uC740 6\uC790 \uC774\uC0C1\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.' }, 400);
           await setUserPin(env, account.id, String(body.initialPin));
         }
-        const admins = await getAdmins(env, { skipUsers: true });
-        if (account.role === 'admin' || account.role === 'super') admins[account.id] = account.role;
-        else delete admins[account.id];
-        admins[SUPER_ADMIN] = 'super';
-        await env.ENGR_KV.put('config:admins', JSON.stringify(admins));
+        const am = await kvMutateJson(env, 'config:admins', async () => {
+          const admins = await getAdmins(env, { skipUsers: true });   // 재시도 시 최신 상태로 다시 계산
+          if (account.role === 'admin' || account.role === 'super') admins[account.id] = account.role;
+          else delete admins[account.id];
+          admins[SUPER_ADMIN] = 'super';
+          return { data: admins };
+        }, { empty: {} });
+        if (am.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
         await auditLog(env, user, 'USER_SAVE', { target: account.id, role: account.role });
         return corsResponse({ ok: true, user: account });
       }
@@ -1853,9 +954,17 @@ export default {
           const syncRole = action === 'remove' ? 'user' : ((newRole === 'super') ? 'super' : 'admin');
           await saveUserAccount(env, { id: targetId, displayName: users[targetId].displayName, role: syncRole, active: users[targetId].active !== false });
         }
-        await env.ENGR_KV.put('config:admins', JSON.stringify(admins));
+        // 유효성 검사는 위 admins 스냅샷으로 끝났고, 실제 반영은 최신 상태에 델타로 다시 적용한다
+        const am2 = await kvMutateJson(env, 'config:admins', async () => {
+          const fresh = await getAdmins(env);
+          if (action === 'add' || action === 'changeRole') fresh[targetId] = (newRole === 'super') ? 'super' : 'admin';
+          else if (action === 'remove') delete fresh[targetId];
+          fresh[SUPER_ADMIN] = 'super';
+          return { data: fresh, value: fresh };
+        }, { empty: {} });
+        if (am2.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
         await auditLog(env, user, 'ADMIN_CHANGE', { action, target: targetId, role: newRole });
-        return corsResponse({ ok: true, admins });
+        return corsResponse({ ok: true, admins: am2.value || admins });
       }
 
       //
@@ -1863,14 +972,14 @@ export default {
         if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: 'Forbidden' }, 403);
         const rangeMonths = await env.ENGR_KV.get('config:range_months') || '3';
         const sessionMin = await env.ENGR_KV.get('config:session_min') || '120';
-        const aiSystem = await env.ENGR_KV.get('config:ai_system') || '';
         const eosWarnDays = await env.ENGR_KV.get('config:eos_warn_days') || '60,30,7';
+        const salesStaleDays = await getSalesStaleDays(env);
         return corsResponse({
           ok: true,
           rangeMonths: parseInt(rangeMonths),
           sessionMin: parseInt(sessionMin),
-          aiSystem,
           eosWarnDays,
+          salesStaleDays,
         });
       }
       if (path === '/admin/config' && request.method === 'POST') {
@@ -1878,30 +987,14 @@ export default {
         const body = await request.json().catch(() => ({}));
         if (body.rangeMonths !== undefined) await env.ENGR_KV.put('config:range_months', String(body.rangeMonths));
         if (body.sessionMin !== undefined) await env.ENGR_KV.put('config:session_min', String(body.sessionMin));
-        if (body.aiSystem !== undefined) await env.ENGR_KV.put('config:ai_system', body.aiSystem);
         if (body.eosWarnDays !== undefined) await env.ENGR_KV.put('config:eos_warn_days', body.eosWarnDays);
+        if (body.salesStaleDays !== undefined) await env.ENGR_KV.put('config:sales_stale_days', String(parseInt(body.salesStaleDays,10)||14));
         await auditLog(env, user, 'CONFIG_CHANGE', { keys: Object.keys(body) });
         return corsResponse({ ok: true });
       }
 
       //
-      if (path === '/admin/cache/clear' && request.method === 'POST') {
-        if (!hasSession || !await isSuper(env, user)) return corsResponse({ ok: false, message: 'Forbidden' }, 403);
-        let cursor, cnt = 0, truncated = false;
-        const max = 1000;
-        do {
-          const list = await env.ENGR_KV.list({ prefix: 'ai:', cursor, limit: 100 });
-          for (const key of list.keys || []) {
-            await env.ENGR_KV.delete(key.name);
-            cnt++;
-            if (cnt >= max) break;
-          }
-          cursor = list.cursor;
-          if (cnt >= max && cursor) { truncated = true; break; }
-        } while (cursor);
-        await auditLog(env, user, 'AI_CACHE_CLEAR', { cleared: cnt, truncated });
-        return corsResponse({ ok: true, cleared: cnt, truncated });
-      }
+      
 
       if (path === '/admin/storage/reset' && request.method === 'POST') {
         if (!hasSession || !await isSuper(env, user)) return corsResponse({ ok: false, message: 'Forbidden' }, 403);
@@ -1956,30 +1049,43 @@ export default {
 
       //
       if (path === '/links' && request.method === 'GET') {
-        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        // 세션 또는 분석 토큰(엔진의 중복 URL 확인용)
+        const anaOkL = !!env.ANALYSIS_WRITE_TOKEN && (request.headers.get('x-analysis-token') || '') === env.ANALYSIS_WRITE_TOKEN;
+        if (!hasSession && !anaOkL) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
         const raw = await env.ENGR_KV.get('config:links');
         return corsResponse({ ok: true, links: raw ? JSON.parse(raw) : [] });
       }
       //
       if (path === '/links' && request.method === 'POST') {
-        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        // 세션 또는 분석 토큰(엔진의 'AI 추천' 링크 — 강제 aiSuggested·중복 URL 거부)
+        const anaOkL = !!env.ANALYSIS_WRITE_TOKEN && (request.headers.get('x-analysis-token') || '') === env.ANALYSIS_WRITE_TOKEN;
+        if (!hasSession && !anaOkL) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        const byEngine = anaOkL && !hasSession;
+        const actorL = byEngine ? 'AI \uCD94\uCC9C(\uBD84\uC11D \uC5D4\uC9C4)' : user;
         const body = await request.json().catch(() => ({}));
-        const raw = await env.ENGR_KV.get('config:links');
-        let links = raw ? JSON.parse(raw) : [];
-        const newLink = {
-          id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-          title: body.title || '',
-          url: body.url || '',
-          category: body.category || '\uAE30\uD0C0',
-          desc: body.desc || '',
-          comments: [],
-          createdBy: user,
-          createdAt: new Date().toISOString(),
-        };
-        links.push(newLink);
-        await env.ENGR_KV.put('config:links', JSON.stringify(links));
-        await auditLog(env, user, 'LINK_ADD', { title: newLink.title });
-        ctx.waitUntil(pushNotify(env, 'link', user, { target: newLink.title || '제목 없음' }));
+        // 중복 URL 검사도 재시도마다 최신 배열로 다시 돈다 — 동시 등록으로 생기는 중복까지 막힌다
+        const m = await kvMutateArray(env, 'config:links', (links) => {
+          if (byEngine && links.some(l => (l.url || '').replace(/\/$/, '') === String(body.url || '').replace(/\/$/, ''))) {
+            return { abort: { body: { ok: false, message: '이미 등록된 URL' }, status: 409 } };
+          }
+          const link = {
+            id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+            title: body.title || '',
+            url: body.url || '',
+            category: body.category || '기타',
+            desc: body.desc || '',
+            comments: [],
+            createdBy: actorL,
+            createdAt: new Date().toISOString(),
+            ...(byEngine ? { aiSuggested: true } : {}),
+          };
+          return { list: [...links, link], value: link };
+        });
+        if (m.abort) return corsResponse(m.abort.body, m.abort.status);
+        if (m.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
+        const newLink = m.value;
+        await auditLog(env, actorL, 'LINK_ADD', { title: newLink.title, aiLink: byEngine ? 1 : 0 });
+        ctx.waitUntil(pushNotify(env, 'link', actorL, { target: newLink.title || '제목 없음' }));
         return corsResponse({ ok: true, link: newLink });
       }
       if (path.match(/^\/links\/[^/]+\/comments(?:\/[^/]+)?$/)) {
@@ -2002,13 +1108,14 @@ export default {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         const id = decodeURIComponent(path.split('/')[2]);
         const body = await request.json().catch(() => ({}));
-        const raw = await env.ENGR_KV.get('config:links');
-        let links = raw ? JSON.parse(raw) : [];
-        const target = links.find(l => l.id === id);
-        if (!await canModifyItem(env, user, target)) return corsResponse({ ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC218\uC815\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
-        const lf = {}; ['title', 'url', 'category', 'desc'].forEach(k => { if (body[k] !== undefined) lf[k] = body[k]; });  // M-3: 허용 필드만(createdBy/createdAt/comments 보존)
-        links = links.map(l => l.id === id ? { ...l, ...lf, id, updatedBy: user, updatedAt: new Date().toISOString() } : l);
-        await env.ENGR_KV.put('config:links', JSON.stringify(links));
+        const m = await kvMutateArray(env, 'config:links', async (links) => {
+          const target = links.find(l => l.id === id);
+          if (!await canModifyItem(env, user, target)) return { abort: { body: { ok: false, message: '작성자 또는 관리자만 수정할 수 있습니다.' }, status: 403 } };
+          const lf = {}; ['title', 'url', 'category', 'desc'].forEach(k => { if (body[k] !== undefined) lf[k] = body[k]; });  // M-3: 허용필드만(createdBy/createdAt/comments 보존)
+          return { list: links.map(l => l.id === id ? { ...l, ...lf, id, updatedBy: user, updatedAt: new Date().toISOString() } : l) };
+        });
+        if (m.abort) return corsResponse(m.abort.body, m.abort.status);
+        if (m.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
         await auditLog(env, user, 'LINK_UPDATE', { id, title: body.title });
         return corsResponse({ ok: true });
       }
@@ -2017,15 +1124,16 @@ export default {
       if (/^\/links\/[^/]+$/.test(path) && request.method === 'DELETE') {  // L-8: /links/{id}/comments \uD761\uC218 \uBC29\uC9C0(\uC815\uD655 \uB9E4\uCE6D)
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         const id = decodeURIComponent(path.split('/')[2]);
-        const raw = await env.ENGR_KV.get('config:links');
-        let links = raw ? JSON.parse(raw) : [];
-        const delLink = links.find(l => l.id === id);
-        if (!await canModifyItem(env, user, delLink)) return corsResponse({ ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC0AD\uC81C\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
-        const before = links.length;
-        links = links.filter(l => l.id !== id);
-        await env.ENGR_KV.put('config:links', JSON.stringify(links));
-        await auditLog(env, user, 'LINK_DELETE', { id, title: delLink?.title });
-        return corsResponse({ ok: true, deleted: before - links.length });
+        const m = await kvMutateArray(env, 'config:links', async (links) => {
+          const delLink = links.find(l => l.id === id);
+          if (!await canModifyItem(env, user, delLink)) return { abort: { body: { ok: false, message: '작성자 또는 관리자만 삭제할 수 있습니다.' }, status: 403 } };
+          const next = links.filter(l => l.id !== id);
+          return { list: next, value: { deleted: links.length - next.length, title: delLink && delLink.title } };
+        });
+        if (m.abort) return corsResponse(m.abort.body, m.abort.status);
+        if (m.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
+        await auditLog(env, user, 'LINK_DELETE', { id, title: m.value && m.value.title });
+        return corsResponse({ ok: true, deleted: m.value ? m.value.deleted : 0 });
       }
 
       //
@@ -2187,70 +1295,26 @@ export default {
         await auditLog(env, user, 'PUSH_SETTINGS_CHANGE', { keys: Object.keys(body) });
         return corsResponse({ ok: true });
       }
-      if (path === '/private-notes' && request.method === 'GET') {
-        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
-        const notes = await loadPrivateNotes(env, user);
-        return corsResponse({ ok: true, items: notes.items });
-      }
-      if (path === '/private-notes' && request.method === 'POST') {
-        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
-        const body = await request.json().catch(() => ({}));
-        const notes = await loadPrivateNotes(env, user);
-        let items = notes.items;
-        const item = {
-          id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-          type: body.type || 'todo',
-          title: body.title || '',
-          content: body.content || '',
-          dueDate: body.dueDate || '',
-          status: body.status || 'open',
-          priority: body.priority || 'normal',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        items.unshift(item);
-        await env.ENGR_KV.put(notes.key, JSON.stringify(items.slice(0, 300)));
-        return corsResponse({ ok: true, item });
-      }
-      if (path.startsWith('/private-notes/') && request.method === 'PUT') {
-        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
-        const id = path.split('/')[2];
-        const body = await request.json().catch(() => ({}));
-        const notes = await loadPrivateNotes(env, user);
-        let items = notes.items;
-        items = items.map(it => it.id === id ? { ...it, ...body, id, updatedAt: new Date().toISOString() } : it);
-        await env.ENGR_KV.put(notes.key, JSON.stringify(items.slice(0, 300)));
-        return corsResponse({ ok: true });
-      }
-      if (path.startsWith('/private-notes/') && request.method === 'DELETE') {
-        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
-        const id = path.split('/')[2];
-        const notes = await loadPrivateNotes(env, user);
-        let items = notes.items;
-        const before = items.length;
-        items = items.filter(it => it.id !== id);
-        await env.ENGR_KV.put(notes.key, JSON.stringify(items));
-        return corsResponse({ ok: true, deleted: before - items.length });
-      }
       //
       if (path === '/knowledge' && request.method === 'POST') {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         const body = await request.json().catch(() => ({}));
-        const raw = await env.ENGR_KV.get('config:knowledge');
-        let items = raw ? JSON.parse(raw) : [];
-        const newItem = {
-          id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-          product: body.product || '\uAE30\uD0C0',
-          category: body.category || '\uD301',
-          title: body.title || '',
-          content: body.content || '',
-          link: body.link || '',
-          comments: [],
-          createdBy: user,
-          createdAt: new Date().toISOString(),
-        };
-        items.push(newItem);
-        await env.ENGR_KV.put('config:knowledge', JSON.stringify(items));
+        const m = await kvMutateArray(env, 'config:knowledge', (items) => {
+          const it = {
+            id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+            product: body.product || '기타',
+            category: body.category || '팁',
+            title: body.title || '',
+            content: body.content || '',
+            link: body.link || '',
+            comments: [],
+            createdBy: user,
+            createdAt: new Date().toISOString(),
+          };
+          return { list: [...items, it], value: it };
+        });
+        if (m.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
+        const newItem = m.value;
         await auditLog(env, user, 'KNOWLEDGE_ADD', { product: newItem.product, title: newItem.title });
         ctx.waitUntil(pushNotify(env, 'knowledge', user, { target: newItem.title || newItem.product || '노하우' }));
         return corsResponse({ ok: true, item: newItem });
@@ -2275,27 +1339,29 @@ export default {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         const id = decodeURIComponent(path.split('/')[2]);  // L-10: \uB313\uAE00 \uB77C\uC6B0\uD2B8\uC640 \uB514\uCF54\uB529 \uD1B5\uC77C
         const body = await request.json().catch(() => ({}));
-        const raw = await env.ENGR_KV.get('config:knowledge');
-        let items = raw ? JSON.parse(raw) : [];
-        const target = items.find(it => it.id === id);
-        if (!await canModifyItem(env, user, target)) return corsResponse({ ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC218\uC815\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
-        const kf = {}; ['product', 'category', 'title', 'content', 'link'].forEach(k => { if (body[k] !== undefined) kf[k] = body[k]; });  // M-4: 허용 필드만(createdBy/createdAt/comments 보존)
-        items = items.map(it => it.id === id ? { ...it, ...kf, id, updatedBy: user, updatedAt: new Date().toISOString() } : it);
-        await env.ENGR_KV.put('config:knowledge', JSON.stringify(items));
-        await auditLog(env, user, 'KNOWLEDGE_UPDATE', { id, title: body.title || target?.title });
+        const m = await kvMutateArray(env, 'config:knowledge', async (items) => {
+          const target = items.find(it => it.id === id);
+          if (!await canModifyItem(env, user, target)) return { abort: { body: { ok: false, message: '작성자 또는 관리자만 수정할 수 있습니다.' }, status: 403 } };
+          const kf = {}; ['product', 'category', 'title', 'content', 'link'].forEach(k => { if (body[k] !== undefined) kf[k] = body[k]; });
+          return { list: items.map(it => it.id === id ? { ...it, ...kf, id, updatedBy: user, updatedAt: new Date().toISOString() } : it), value: { title: target && target.title } };
+        });
+        if (m.abort) return corsResponse(m.abort.body, m.abort.status);
+        if (m.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
+        await auditLog(env, user, 'KNOWLEDGE_UPDATE', { id, title: body.title || (m.value && m.value.title) });
         return corsResponse({ ok: true });
       }
       //
       if (path.startsWith('/knowledge/') && request.method === 'DELETE') {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         const id = decodeURIComponent(path.split('/')[2]);  // L-10: \uB313\uAE00 \uB77C\uC6B0\uD2B8\uC640 \uB514\uCF54\uB529 \uD1B5\uC77C
-        const raw = await env.ENGR_KV.get('config:knowledge');
-        let items = raw ? JSON.parse(raw) : [];
-        const target = items.find(it => it.id === id);
-        if (!await canModifyItem(env, user, target)) return corsResponse({ ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC0AD\uC81C\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
-        items = items.filter(it => it.id !== id);
-        await env.ENGR_KV.put('config:knowledge', JSON.stringify(items));
-        await auditLog(env, user, 'KNOWLEDGE_DELETE', { id, title: target?.title });
+        const m = await kvMutateArray(env, 'config:knowledge', async (items) => {
+          const target = items.find(it => it.id === id);
+          if (!await canModifyItem(env, user, target)) return { abort: { body: { ok: false, message: '작성자 또는 관리자만 삭제할 수 있습니다.' }, status: 403 } };
+          return { list: items.filter(it => it.id !== id), value: { title: target && target.title } };
+        });
+        if (m.abort) return corsResponse(m.abort.body, m.abort.status);
+        if (m.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
+        await auditLog(env, user, 'KNOWLEDGE_DELETE', { id, title: m.value && m.value.title });
         return corsResponse({ ok: true });
       }
 
@@ -2310,23 +1376,26 @@ export default {
       if (path === '/eos' && request.method === 'POST') {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         const body = await request.json().catch(() => ({}));
-        const raw = await env.ENGR_KV.get('config:eos');
-        let items = raw ? JSON.parse(raw) : [];
-        const newItem = {
-          id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-          customer: body.customer || '',
-          productDesc: body.productDesc || '',
-          siteId: body.siteId || '',
-          quantity: body.quantity || '',
-          serial: body.serial || '',
-          startDate: okDate(body.startDate),
-          expireDate: okDate(body.expireDate),   // End Date (지원/만료 종료일 — D-day 기준)
-          memo: body.memo || '',
-          createdBy: user,
-          createdAt: new Date().toISOString(),
-        };
-        items.push(newItem);
-        await env.ENGR_KV.put('config:eos', JSON.stringify(items));
+        const m = await kvMutateArray(env, 'config:eos', (items) => {
+          const it = {
+            id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+            customer: body.customer || '',
+            productDesc: body.productDesc || '',
+            siteId: body.siteId || '',
+            quantity: body.quantity || '',
+            serial: body.serial || '',
+            startDate: okDate(body.startDate),
+            networks: okNetworks(body.networks),                          // 망 구분(인터넷망/내부망/기타)
+            perpetual: !!body.perpetual,                                  // Perpetual = 만료 없음
+            expireDate: body.perpetual ? '' : okDate(body.expireDate),   // End Date (지원/만료 종료일 — D-day 기준)
+            memo: body.memo || '',
+            createdBy: user,
+            createdAt: new Date().toISOString(),
+          };
+          return { list: [...items, it], value: it };
+        });
+        if (m.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
+        const newItem = m.value;
         await auditLog(env, user, 'EOS_ADD', { customer: newItem.customer, product: newItem.productDesc, expire: newItem.expireDate });
         ctx.waitUntil(pushNotify(env, 'eos', user, { target: [newItem.productDesc, newItem.customer].filter(Boolean).join(' / ') || '라이선스' }));
         return corsResponse({ ok: true, item: newItem });
@@ -2337,21 +1406,25 @@ export default {
         const items = Array.isArray(body.items) ? body.items : [];
         if (!items.length) return corsResponse({ ok: false, message: '등록할 항목이 없습니다.' }, 400);
         if (items.length > 200) return corsResponse({ ok: false, message: '한 번에 최대 200건까지 등록할 수 있습니다.' }, 400);  // M-8: KV 비대화 방지
-        const raw = await env.ENGR_KV.get('config:eos');
-        let store = raw ? JSON.parse(raw) : [];
-        const created = [];
-        for (const b of items) {
-          if (!b || !b.productDesc) continue;
-          const it = {
-            id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-            customer: b.customer || '', productDesc: b.productDesc || '', siteId: b.siteId || '',
-            quantity: b.quantity || '', serial: b.serial || '', startDate: okDate(b.startDate),
-            expireDate: okDate(b.expireDate), memo: b.memo || '', createdBy: user, createdAt: new Date().toISOString(),
-          };
-          store.push(it); created.push(it);
-        }
-        if (!created.length) return corsResponse({ ok: false, message: 'Product Description이 있는 항목이 없습니다.' }, 400);
-        await env.ENGR_KV.put('config:eos', JSON.stringify(store));
+        const m = await kvMutateArray(env, 'config:eos', (store) => {
+          const made = [];
+          for (const b of items) {
+            if (!b || !b.productDesc) continue;
+            made.push({
+              id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+              customer: b.customer || '', productDesc: b.productDesc || '', siteId: b.siteId || '',
+              quantity: b.quantity || '', serial: b.serial || '', startDate: okDate(b.startDate),
+              networks: okNetworks(b.networks),
+              perpetual: !!b.perpetual, expireDate: b.perpetual ? '' : okDate(b.expireDate),
+              memo: b.memo || '', createdBy: user, createdAt: new Date().toISOString(),
+            });
+          }
+          if (!made.length) return { abort: { body: { ok: false, message: 'Product Description이 있는 항목이 없습니다.' }, status: 400 } };
+          return { list: [...store, ...made], value: made };
+        });
+        if (m.abort) return corsResponse(m.abort.body, m.abort.status);
+        if (m.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
+        const created = m.value;
         await auditLog(env, user, 'EOS_ADD_BULK', { count: created.length, customer: created[0].customer });
         const cust = created[0].customer || '';
         const tgt = created.length > 1 ? `${cust} ${created[0].productDesc} 외 ${created.length - 1}건` : [created[0].productDesc, cust].filter(Boolean).join(' / ');
@@ -2362,31 +1435,37 @@ export default {
       if (path.startsWith('/eos/') && request.method === 'DELETE') {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         const id = path.split('/')[2];
-        const raw = await env.ENGR_KV.get('config:eos');
-        let items = raw ? JSON.parse(raw) : [];
-        const target = items.find(it => it.id === id);
-        if (!await canModifyItem(env, user, target)) return corsResponse({ ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC0AD\uC81C\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
-        const before = items.length;
-        items = items.filter(it => it.id !== id);
-        await env.ENGR_KV.put('config:eos', JSON.stringify(items));
+        const m = await kvMutateArray(env, 'config:eos', async (items) => {
+          const target = items.find(it => it.id === id);
+          if (!await canModifyItem(env, user, target)) return { abort: { body: { ok: false, message: '작성자 또는 관리자만 삭제할 수 있습니다.' }, status: 403 } };
+          const next = items.filter(it => it.id !== id);
+          return { list: next, value: { deleted: items.length - next.length } };
+        });
+        if (m.abort) return corsResponse(m.abort.body, m.abort.status);
+        if (m.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
         await auditLog(env, user, 'EOS_DELETE', { id });
-        return corsResponse({ ok: true, deleted: before - items.length });
+        return corsResponse({ ok: true, deleted: m.value ? m.value.deleted : 0 });
       }
       //
       if (path.startsWith('/eos/') && request.method === 'PUT') {
         if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         const id = path.split('/')[2];
         const body = await request.json().catch(() => ({}));
-        const raw = await env.ENGR_KV.get('config:eos');
-        let items = raw ? JSON.parse(raw) : [];
-        const target = items.find(it => it.id === id);
-        if (!await canModifyItem(env, user, target)) return corsResponse({ ok: false, message: '\uC791\uC131\uC790 \uB610\uB294 \uAD00\uB9AC\uC790\uB9CC \uC218\uC815\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
-        const ef = {}; ['customer', 'productDesc', 'siteId', 'quantity', 'serial', 'memo'].forEach(k => { if (body[k] !== undefined) ef[k] = body[k]; });  // M-3/M-7: 허용필드+날짜검증
-        if (body.startDate !== undefined) ef.startDate = okDate(body.startDate);
-        if (body.expireDate !== undefined) ef.expireDate = okDate(body.expireDate);
-        items = items.map(it => it.id === id ? { ...it, ...ef, id, updatedBy: user, updatedAt: new Date().toISOString() } : it);
-        await env.ENGR_KV.put('config:eos', JSON.stringify(items));
-        await auditLog(env, user, 'EOS_UPDATE', { id, customer: target?.customer, product: body.productDesc || target?.productDesc, expire: body.expireDate || target?.expireDate });
+        const m = await kvMutateArray(env, 'config:eos', async (items) => {
+          const target = items.find(it => it.id === id);
+          if (!await canModifyItem(env, user, target)) return { abort: { body: { ok: false, message: '작성자 또는 관리자만 수정할 수 있습니다.' }, status: 403 } };
+          const ef = {}; ['customer', 'productDesc', 'siteId', 'quantity', 'serial', 'memo'].forEach(k => { if (body[k] !== undefined) ef[k] = body[k]; });  // M-3/M-7: 허용필드+날짜검증
+          if (body.startDate !== undefined) ef.startDate = okDate(body.startDate);
+          if (body.networks !== undefined) ef.networks = okNetworks(body.networks);
+          if (body.perpetual !== undefined) ef.perpetual = !!body.perpetual;
+          if (body.expireDate !== undefined) ef.expireDate = okDate(body.expireDate);
+          if (ef.perpetual) ef.expireDate = '';   // Perpetual이면 만료일은 항상 비운다(D-day·갱신 대상에서 제외)
+          return { list: items.map(it => it.id === id ? { ...it, ...ef, id, updatedBy: user, updatedAt: new Date().toISOString() } : it), value: { customer: target && target.customer, productDesc: target && target.productDesc, expireDate: target && target.expireDate } };
+        });
+        if (m.abort) return corsResponse(m.abort.body, m.abort.status);
+        if (m.conflict) return corsResponse(KV_CONFLICT_RESPONSE, 409);
+        const prev = m.value || {};
+        await auditLog(env, user, 'EOS_UPDATE', { id, customer: prev.customer, product: body.productDesc || prev.productDesc, expire: body.expireDate || prev.expireDate });
         return corsResponse({ ok: true });
       }
 
@@ -2409,7 +1488,9 @@ export default {
 
       // \u2500\u2500 \u00A71 \uD638\uD658\uC131\u00B7EOS \uB9E4\uD2B8\uB9AD\uC2A4 (compat_matrix \u00B7 D1) \u2500\u2500
       if (path === '/compat' && request.method === 'GET') {
-        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        // 세션 또는 분석 토큰(엔진의 diff 비교용 읽기)
+        const anaOkC = !!env.ANALYSIS_WRITE_TOKEN && (request.headers.get('x-analysis-token') || '') === env.ANALYSIS_WRITE_TOKEN;
+        if (!hasSession && !anaOkC) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
         if (!(await getFeatureFlags(env)).compat) return corsResponse({ ok: false, message: '\uBE44\uD65C\uC131\uD654\uB41C \uAE30\uB2A5\uC785\uB2C8\uB2E4.' }, 403);
         const q = (new URL(request.url).searchParams.get('q') || '').trim().toLowerCase();
         let rows = [];
@@ -2418,73 +1499,22 @@ export default {
         return corsResponse({ ok: true, items: rows });
       }
       if (path === '/compat' && request.method === 'POST') {
-        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '\uAD00\uB9AC\uC790\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
+        // \uAD00\uB9AC\uC790 \uB610\uB294 \uBD84\uC11D \uD1A0\uD070(\uC5D4\uC9C4\uC758 \uCD08\uC548 \uB4F1\uB85D \uC804\uC6A9 \u2014 status\uB294 \uD56D\uC0C1 draft)
+        const anaOkP = !!env.ANALYSIS_WRITE_TOKEN && (request.headers.get('x-analysis-token') || '') === env.ANALYSIS_WRITE_TOKEN;
+        if (!anaOkP && (!hasSession || !await isAdmin(env, user))) return corsResponse({ ok: false, message: '\uAD00\uB9AC\uC790\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
         if (!(await getFeatureFlags(env)).compat) return corsResponse({ ok: false, message: '\uBE44\uD65C\uC131\uD654\uB41C \uAE30\uB2A5\uC785\uB2C8\uB2E4.' }, 403);  // L-11
         const b = await request.json().catch(() => ({}));
         const now = new Date().toISOString();
         try {
           const r = await env.DB.prepare('INSERT INTO compat_matrix (product,product_version,os,os_version,supported,eos_date,eol_date,note,source,status,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
             .bind(b.product || '', b.product_version || '', b.os || '', b.os_version || '', b.supported || '', b.eos_date || '', b.eol_date || '', b.note || '', b.source || '', 'draft', now).run();
-          await auditLog(env, user, 'MATRIX_ADD', { matrixType: 'compat', product: b.product || '', os: b.os || '' });
+          const actorC = (anaOkP && !hasSession) ? 'analysis-engine' : user;
+          await auditLog(env, actorC, 'MATRIX_ADD', { matrixType: 'compat', product: b.product || '', os: b.os || '', aiDraft: (anaOkP && !hasSession) ? 1 : 0 });
+          if (anaOkP && !hasSession) ctx.waitUntil(pushNotify(env, 'compat', actorC, { target: `${b.product || ''} ${b.product_version || ''}`.trim() || '\uB9E4\uD2B8\uB9AD\uC2A4' }));
           return corsResponse({ ok: true, id: r.meta?.last_row_id });
         } catch (e) { return corsResponse({ ok: false, message: '\uC800\uC7A5 \uC2E4\uD328: ' + e.message }, 500); }
       }
-      if (path === '/compat/extract' && request.method === 'POST') {
-        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 사용할 수 있습니다.' }, 403);
-        const b = await request.json().catch(() => ({}));
-        const seed = (b.url || '').trim();
-        if (!/^https:\/\/(techdocs|knowledge)\.broadcom\.com\//.test(seed)) return corsResponse({ ok: false, message: '허용된 Broadcom 공식 문서 URL이 아닙니다.' }, 400);
-        const _strip = h => h.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/\s+/g, ' ').trim();
-        const _ft = async u => { try { const r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ENGRHUB/1.0)' }, cf: { cacheTtl: 3600 } }); if (!r.ok) return ''; return await r.text(); } catch (_) { return ''; } };
-        const _KW = /(operating-system-requirements|endpoint-computer-requirements|endpoint-systems|deprecated-platform|client-system|compatibility-with-the|supported-operating)/i;
-        const _seen = new Set([seed]); let _frontier = [seed]; const _texts = []; const _BUDGET = 14;
-        for (let _d = 0; _d < 3 && _frontier.length && _texts.length < _BUDGET; _d++) {
-          const _batch = _frontier.slice(0, _BUDGET - _texts.length);
-          const _htmls = await Promise.all(_batch.map(async u => ({ u, html: await _ft(u) })));
-          const _next = [];
-          for (const _pg of _htmls) {
-            if (!_pg.html) continue;
-            _texts.push('[' + _pg.u.split('/').pop().slice(0, 50) + '] ' + _strip(_pg.html).slice(0, 18000));
-            for (const _m of _pg.html.matchAll(/href="([^"#?]+)"/g)) {
-              if (!_KW.test(_m[1])) continue;
-              let _abs; try { _abs = new URL(_m[1], _pg.u).href.replace(/\/$/, ''); } catch (_) { continue; }
-              if (!/^https:\/\/(techdocs|knowledge)\.broadcom\.com\//.test(_abs) || _seen.has(_abs)) continue;
-              _seen.add(_abs); _next.push(_abs);
-            }
-          }
-          _frontier = _next;
-        }
-        if (!_texts.length) return corsResponse({ ok: false, message: '공식 시드 페이지 fetch 실패' }, 502);
-        const _subs = _texts;
-        const _DATA = /(endpoint-systems|for-servers|deprecated-platform|compatibility-with)/;
-        _texts.sort((a, b) => (_DATA.test(a) ? 0 : 1) - (_DATA.test(b) ? 0 : 1));
-        let pageText;
-        if (_texts.length <= 2 && _texts[0].length > 24000) {
-          const _full = _texts.join(' ');
-          const _kw = /(windows\s*(client|server|10|11|8\.1)|\bmac(os)?\b|\blinux\b|ubuntu|red hat|\brhel\b|oracle linux|debian|suse|rocky|amazon linux|operating system|client system requirement|supported (operating|platform))/gi;
-          const _w = []; const _tk = new Set(); let _mm;
-          while ((_mm = _kw.exec(_full)) && _w.length < 16) {
-            const _s = Math.max(0, _mm.index - 150); const _k = Math.floor(_s / 1400);
-            if (_tk.has(_k)) continue; _tk.add(_k); _w.push(_full.slice(_s, _s + 1700));
-          }
-          pageText = (_w.length ? _w.join(' … ') : _full).slice(0, 24000);
-        } else {
-          const _per = _texts.length <= 2 ? 22000 : 3500;
-          pageText = _texts.map(t => t.slice(0, _per)).join(' ').slice(0, 24000);
-        }
-        const prod = (b.product || '').trim(), ver = (b.version || '').trim();
-        const pr = `아래는 Broadcom 공식 페이지 여러 개의 텍스트다(각 [파일명]으로 구분). "Symantec ${prod} ${ver}"의 지원 OS를 JSON 배열로만 답하라(설명/코드블록 금지). 규칙: (1)텍스트에 실제로 적힌 버전만, 창작/추정 절대 금지, 없으면 []. (2)엔드포인트(클라이언트, 'endpoint-systems' 페이지)와 서버('for-servers' 페이지)를 반드시 별도 행으로. (3)os 예: "Windows(엔드포인트)","Windows Server","macOS(엔드포인트)","Linux(엔드포인트)","Linux(서버)". (4)os_version엔 해당 OS의 정확한 버전/범위를 페이지 그대로(예 "RHEL 8.4–8.8","Sonoma 14.0–14.7.6"). 서로 다른 페이지의 버전을 한 행에 섞지 마라. (5)deprecated/ARM64/VC++ 주석은 note에 한국어로 간결히. 각 원소: {"os":"","os_version":"","supported":"지원","note":""}. [텍스트] ${pageText}`;
-        try {
-          const d = await callAI(env, pr, 'technical_analysis');
-          const text = (d && d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts || []).map(p => p.text || '').join('');
-          const mt = text.match(/\[[\s\S]*\]/);
-          let rows = [];
-          try { rows = mt ? JSON.parse(mt[0]) : []; } catch (_) { rows = []; }
-          if (!Array.isArray(rows)) rows = [];
-          await auditLog(env, user, 'AI_CALL', { compatType: 'extract', target: `${prod} ${ver}`, count: rows.length });
-          return corsResponse({ ok: true, rows, source: seed, crawled: _subs.length, pages: _texts.map(t => (t.match(/^\[([^\]]*)\]/) || ['', ''])[1]) });
-        } catch (e) { return corsResponse({ ok: false, message: '추출 실패: ' + e.message }, 500); }
-      }
+      
       if (path.startsWith('/compat/') && path.endsWith('/confirm') && request.method === 'POST') {
         if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '\uAD00\uB9AC\uC790\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.' }, 403);
         if (!(await getFeatureFlags(env)).compat) return corsResponse({ ok: false, message: '\uBE44\uD65C\uC131\uD654\uB41C \uAE30\uB2A5\uC785\uB2C8\uB2E4.' }, 403);  // L-11
@@ -2572,6 +1602,523 @@ export default {
         return corsResponse({ ok: true, snapshot: snap });
       }
 
+      // ── A안: 팀 데일리 다이제스트 생성 (mj.park 전용, 조회 전용·외부발송 없음) ──
+      if (path === '/team/digest' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        if (!(await getFeatureFlags(env)).digest) return corsResponse({ ok: false, message: '비활성화된 기능입니다.' }, 403);
+        if (!await isMonitorAllowed(env, user)) { await auditLog(env, user, 'DIGEST_GEN', { digDate: '', denied: true }); return corsResponse({ ok: false, message: '접근 권한이 없습니다(팀 모니터 허용목록).' }, 403); }
+        let D; try { D = await buildDigestData(env); } catch (e) { return corsResponse({ ok: false, message: 'Jira 조회 실패: ' + e.message }, 502); }
+        const { day, dateLabel, dueToday, overdue, metaTotal, licenseSoon, doneY, headline, patternLines, mgmtTotal } = D;
+        const esc = s => String(s || '').replace(/\s+/g, ' ').trim();
+        // ⚠️ 다이제스트 본문은 팀 공통 항목만 — 담당자별 마감·지연·미기입·성과는 각자 개인 브리핑으로만 간다.
+        //    (전원에게 가는 카드의 상단 공통부와 동일한 내용이라, 여기서 미리보기·편집하는 것이다)
+        const lines = [`📰 보안기술팀 브리핑 — ${dateLabel}`];
+        if (headline.length) { lines.push('', '🗞 팀 헤드라인'); headline.forEach(s => lines.push(`· ${esc(s)}`)); }
+        if (licenseSoon.length) { lines.push('', `📄 라이선스 만료 임박 (${licenseSoon.length}건)`); licenseSoon.forEach(r => lines.push(`· ${r.customer} ${esc(r.product)} — D-${r.dday} (${r.expireDate})`)); }
+        lines.push('', `📊 팀 전체 — 마감 ${dueToday.length} · 지연 ${overdue.length} · 미기입 ${metaTotal} · 만료임박 ${licenseSoon.length}`);
+        if (!headline.length && !licenseSoon.length) lines.push('', '(팀 공통으로 알릴 항목이 없습니다 — 공지를 입력하면 이 카드에 함께 실립니다)');
+        lines.push('', '🔗 HUB에서 전체 보기 → {HUB_URL}');
+        const text = lines.join('\n');
+        const noti = await digestGetNotice(env);
+        const counts = { due: dueToday.length, overdue: overdue.length, meta: metaTotal, lic: licenseSoon.length, done: doneY.length, hl: headline.length, mgmt: mgmtTotal };
+        await auditLog(env, user, 'DIGEST_GEN', { digDate: day, digCounts: counts });
+        return corsResponse({ ok: true, date: day, notice: noti.text, noticeUntil: noti.until, noticeExpired: noti.expired, counts, sections: { licenseSoon, headline, patterns: patternLines }, text });
+      }
+
+      // ── 자동 발송 스케줄 on/off·시각 (mj.park) ──
+      if (path === '/team/digest/schedule' && (request.method === 'GET' || request.method === 'POST')) {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        if (!await isMonitorAllowed(env, user)) return corsResponse({ ok: false, message: '접근 권한이 없습니다.' }, 403);
+        if (request.method === 'GET') return corsResponse({ ok: true, ...(await digestGetSchedule(env)) });
+        const b = await request.json().catch(() => ({}));
+        if (b.time && !/^([01]\d|2[0-3]):(00|30)$/.test(b.time)) return corsResponse({ ok: false, message: '시각은 30분 단위(HH:00 또는 HH:30)만 가능합니다.' }, 400);
+        const saved = await digestSaveSchedule(env, b, user);
+        if (!saved) return corsResponse({ ok: false, message: '저장 실패' }, 500);
+        await auditLog(env, user, 'DIGEST_SCHEDULE', { digEnabled: saved.enabled, digTime: saved.time });
+        return corsResponse({ ok: true, ...saved });
+      }
+
+      // ── 다이제스트 Adaptive Card (x-analysis-token 게이트) — Power Automate flow가 GET해 채널에 게시. 워커는 외부 발송 없음, 카드 JSON만 서빙 ──
+      if (path === '/team/digest/card' && request.method === 'GET') {
+        const tok = request.headers.get('x-analysis-token') || '';
+        if (!env.ANALYSIS_WRITE_TOKEN || tok !== env.ANALYSIS_WRITE_TOKEN) return corsResponse({ ok: false, message: '인증 실패' }, 401);
+        if (!(await getFeatureFlags(env)).digest) return corsResponse({ ok: false, message: '비활성화된 기능입니다.' }, 403);
+        const hubUrl = url.searchParams.get('hub') || 'https://engr-jira.github.io/engr-hub-dev/';
+        let D; try { D = await buildDigestData(env); } catch (e) { return corsResponse({ ok: false, message: 'Jira 조회 실패: ' + e.message }, 502); }
+        const cardNotice = url.searchParams.has('notice') ? (url.searchParams.get('notice') || '') : (await digestGetNotice(env)).text;
+        const card = buildDigestCard(D, hubUrl, cardNotice);
+        await auditLog(env, 'teams-flow', 'DIGEST_GEN', { digDate: D.day, via: 'card', mgmt: D.mgmtTotal });
+        // ?raw=1 → 카드 JSON만 그대로 반환 (Power Automate '적응형 카드 게시'에 body 통째로 매핑 가능)
+        if (url.searchParams.get('raw') === '1') return corsResponse(card);
+        return corsResponse({ ok: true, card, attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] });
+      }
+
+      // ── /team/digest/push(전사 채널 발사)는 폐지됨 — 개인 경로(/team/digest/personal)만 사용 ──
+
+      // ── 개인별 브리핑 (x-analysis-token 또는 mj.park) — Flow가 각 담당자에게 1:1 전달 ──
+      if (path === '/team/digest/personal' && (request.method === 'GET' || request.method === 'POST')) {
+        const tok = request.headers.get('x-analysis-token') || '';
+        const viaToken = env.ANALYSIS_WRITE_TOKEN && tok === env.ANALYSIS_WRITE_TOKEN;
+        const viaSession = hasSession && await isMonitorAllowed(env, user);
+        if (!viaToken && !viaSession) return corsResponse({ ok: false, message: '권한이 없습니다(mj.park 또는 분석 토큰).' }, 401);
+        if (!(await getFeatureFlags(env)).digest) return corsResponse({ ok: false, message: '비활성화된 기능입니다.' }, 403);
+        const hubUrl = url.searchParams.get('hub') || 'https://engr-jira.github.io/engr-hub-dev/';
+        const noti = url.searchParams.has('notice') ? (url.searchParams.get('notice') || '') : (await digestGetNotice(env)).text;
+        let R; try { R = await buildPersonalDigests(env, hubUrl, noti); } catch (e) { return corsResponse({ ok: false, message: 'Jira 조회 실패: ' + e.message }, 502); }
+        // 수신자 정책 적용 — GET(미리보기)에서도 "실제로 누구에게 갈지"를 함께 보여준다
+        const rcfg = await digestGetRecipients(env);
+        const pol = applyDigestRecipientPolicy(R.recipients, rcfg, env.MAIL_DOMAIN || 'escare.co.kr');
+        // POST: 정책이 추린 목록만 전송 (Flow가 대상자에게 DM)
+        let sent = 0, failed = 0, pushErrors = [];
+        if (request.method === 'POST') { const pr = await pushPersonalDigests(env, pol.send); sent = pr.sent; failed = pr.failed; pushErrors = pr.errors || []; }
+        await auditLog(env, viaSession ? user : 'teams-flow', 'DIGEST_GEN', { via: 'personal', digDate: R.date, digMode: pol.mode, people: R.recipients.length, willSend: pol.send.length, sent, failed });
+        return corsResponse({
+          ok: true, date: R.date, dateLabel: R.dateLabel, mode: pol.mode, testTo: rcfg.testTo,
+          count: R.recipients.length, willSend: pol.send.length, held: pol.held, sent, failed, errors: pushErrors,
+          hasCommon: R.hasCommon, unmatched: R.unmatched,   // unmatched = Jira 담당자인데 HUB 계정이 없어 개인 전달 불가한 이름
+          sendTo: pol.send.map(r => ({ assignee: r.assignee, testOf: r.testOf || '', userId: r.userId, email: r.email })),
+          recipients: R.recipients
+        });
+      }
+
+      // ── 개인 브리핑 수신자 설정 (mj.park) — off/test/allow/all ──
+      if (path === '/team/digest/recipients' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        if (!await isMonitorAllowed(env, user)) return corsResponse({ ok: false, message: '접근 권한이 없습니다.' }, 403);
+        const cfg = await digestGetRecipients(env);
+        const users = await getUsers(env);
+        const people = Object.values(users).filter(u => u && u.active !== false && u.id)
+          .map(u => ({ id: u.id, name: u.displayName || u.id })).sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+        return corsResponse({ ok: true, ...cfg, people, hasWebhook: !!env.TEAMS_WEBHOOK_URL });
+      }
+      if (path === '/team/digest/recipients' && request.method === 'POST') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        if (!await isMonitorAllowed(env, user)) return corsResponse({ ok: false, message: '접근 권한이 없습니다.' }, 403);
+        const b = await request.json().catch(() => ({}));
+        if (b.mode && !DIGEST_RECIPIENT_MODES.includes(b.mode)) return corsResponse({ ok: false, message: '알 수 없는 모드입니다.' }, 400);
+        const saved = await digestSaveRecipients(env, b, user);
+        if (!saved) return corsResponse({ ok: false, message: '저장 실패' }, 500);
+        await auditLog(env, user, 'DIGEST_RECIPIENTS', { digMode: saved.mode, n: saved.allow.length, testTo: saved.testTo });
+        return corsResponse({ ok: true, ...saved });
+      }
+
+      // ── 📬 내 브리핑 (로그인한 본인 것만) — Teams·Flow 권한과 무관한 pull 경로 ──
+      if (path === '/team/digest/mine' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        if (!(await getFeatureFlags(env)).digest) return corsResponse({ ok: false, message: '비활성화된 기능입니다.' }, 403);
+        const hubUrl = url.searchParams.get('hub') || 'https://engr-jira.github.io/engr-hub-dev/';
+        const noti = await digestGetNotice(env);
+        let R; try { R = await buildPersonalDigests(env, hubUrl, noti.text); } catch (e) { return corsResponse({ ok: false, message: 'Jira 조회 실패: ' + e.message }, 502); }
+        const mine = R.recipients.find(r => r.userId && r.userId === user) || null;   // 세션 계정과 일치하는 건만
+        return corsResponse({
+          ok: true, date: R.date, dateLabel: R.dateLabel, notice: noti.text,
+          assignee: mine ? mine.assignee : '', counts: mine ? mine.counts : { due: 0, overdue: 0, meta: 0, done: 0 },
+          items: mine ? mine.items : { dueToday: [], overdue: [], meta: { count: 0, fields: {} }, doneY: [] }
+        });
+      }
+
+      // ── 다이제스트 공지사항 저장/조회 (mj.park) — 지정 날짜까지 유지되어 cron 자동 게시에도 포함 ──
+      if (path === '/team/digest/notice' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        if (!await isMonitorAllowed(env, user)) return corsResponse({ ok: false, message: '접근 권한이 없습니다.' }, 403);
+        const n = await digestGetNotice(env);
+        return corsResponse({ ok: true, notice: n.text, until: n.until, expired: n.expired, rawText: n.rawText || '' });
+      }
+      if (path === '/team/digest/notice' && request.method === 'POST') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        if (!await isMonitorAllowed(env, user)) return corsResponse({ ok: false, message: '접근 권한이 없습니다.' }, 403);
+        const b = await request.json().catch(() => ({}));
+        const text = String(b.text || '').slice(0, 500);
+        let until = '';
+        if (text.trim()) {
+          if (/^\d{4}-\d{2}-\d{2}$/.test(b.until || '')) until = b.until;
+          else { const d = Math.max(0, Math.min(60, parseInt(b.days) || 0)); if (b.days !== -1 && b.days !== '-1') until = new Date(Date.now() + 9 * 3600e3 + d * 86400000).toISOString().slice(0, 10); }
+        }
+        await digestSaveNotice(env, text, until, user);
+        await auditLog(env, user, 'DIGEST_NOTICE', { until: until || 'none', len: text.length });
+        return corsResponse({ ok: true, notice: text, until });
+      }
+
+      // ══ 🧠 팀 퀴즈 (P1) — 문제은행·주간출제(관리자) / 응시·채점·순위(세션) ══
+      if (path === '/quiz/questions' && request.method === 'GET') {
+        const qTok = request.headers.get('x-analysis-token') || '';
+        const qViaEngine = env.ANALYSIS_WRITE_TOKEN && qTok === env.ANALYSIS_WRITE_TOKEN;   // 분석 엔진(초안 중복·수량 확인용)
+        if (!qViaEngine && (!hasSession || !await isAdmin(env, user))) return corsResponse({ ok: false, message: '관리자만 접근할 수 있습니다.' }, 403);
+        await quizEnsureTables(env);
+        const prod = url.searchParams.get('product') || '', st = url.searchParams.get('status') || '';
+        let sql = 'SELECT * FROM quiz_question', cond = [], bind = [];
+        if (prod) { cond.push('product=?'); bind.push(prod); }
+        if (st) { cond.push('status=?'); bind.push(st); }
+        if (cond.length) sql += ' WHERE ' + cond.join(' AND ');
+        sql += ' ORDER BY (status=\'approved\') DESC, updated_at DESC LIMIT 500';
+        const r = await env.DB.prepare(sql).bind(...bind).all();
+        return corsResponse({ ok: true, items: (r.results || []) });
+      }
+      if (path === '/quiz/question' && (request.method === 'POST' || request.method === 'PUT')) {
+        const qTok = request.headers.get('x-analysis-token') || '';
+        const qViaEngine = request.method === 'POST' && env.ANALYSIS_WRITE_TOKEN && qTok === env.ANALYSIS_WRITE_TOKEN;   // 엔진 자동 초안(POST만, 수정 불가)
+        if (!qViaEngine && (!hasSession || !await isAdmin(env, user))) return corsResponse({ ok: false, message: '관리자만 접근할 수 있습니다.' }, 403);
+        await quizEnsureTables(env);
+        const b = await request.json().catch(() => ({}));
+        if (qViaEngine) {
+          b.status = 'draft';   // 엔진 초안은 무조건 초안 — 승인은 관리자만
+          const cnt = await env.DB.prepare("SELECT COUNT(*) AS n FROM quiz_question WHERE status='draft' AND created_by='engine'").first();
+          if (Number(cnt && cnt.n) >= 30) return corsResponse({ ok: false, message: '엔진 초안 상한(30) 도달 — 관리자 검토 후 재적재' }, 429);
+        }
+        const now = Date.now();
+        const F = { product: String(b.product || '').slice(0, 20), type: ['mc', 'ox', 'short'].includes(b.type) ? b.type : 'mc', difficulty: Math.max(1, Math.min(3, parseInt(b.difficulty) || 1)), question: String(b.question || '').slice(0, 2000), choices: JSON.stringify(Array.isArray(b.choices) ? b.choices.slice(0, 8) : []), answer: String(b.answer || '').slice(0, 500), accepts: JSON.stringify(Array.isArray(b.accepts) ? b.accepts.slice(0, 20) : []), keywords: JSON.stringify(Array.isArray(b.keywords) ? b.keywords.slice(0, 20) : []), explanation: String(b.explanation || '').slice(0, 3000), source: String(b.source || '').slice(0, 300), tags: String(b.tags || '').slice(0, 200), status: ['draft', 'approved', 'archived'].includes(b.status) ? b.status : 'draft', credit: String(b.credit || '').slice(0, 60) };
+        if (request.method === 'PUT' && b.id) {
+          await env.DB.prepare("UPDATE quiz_question SET product=?,type=?,difficulty=?,question=?,choices=?,answer=?,accepts=?,keywords=?,explanation=?,source=?,tags=?,status=?,credit=?,updated_at=? WHERE id=?").bind(F.product, F.type, F.difficulty, F.question, F.choices, F.answer, F.accepts, F.keywords, F.explanation, F.source, F.tags, F.status, F.credit, now, parseInt(b.id)).run();
+          await auditLog(env, user, 'QUIZ_Q', { quizAct: 'update', qid: parseInt(b.id) });
+          return corsResponse({ ok: true, id: parseInt(b.id) });
+        }
+        const ins = await env.DB.prepare("INSERT INTO quiz_question (product,type,difficulty,question,choices,answer,accepts,keywords,explanation,source,tags,status,credit,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(F.product, F.type, F.difficulty, F.question, F.choices, F.answer, F.accepts, F.keywords, F.explanation, F.source, F.tags, F.status, F.credit, qViaEngine ? 'engine' : user, now, now).run();
+        await auditLog(env, qViaEngine ? 'analysis-agent' : user, 'QUIZ_Q', { quizAct: qViaEngine ? 'engine-draft' : 'create' });
+        return corsResponse({ ok: true, id: ins.meta && ins.meta.last_row_id });
+      }
+      if (path === '/quiz/question' && request.method === 'DELETE') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 접근할 수 있습니다.' }, 403);
+        await quizEnsureTables(env);
+        const id = parseInt(url.searchParams.get('id') || '0'); if (!id) return corsResponse({ ok: false, message: 'id 필요' }, 400);
+        await env.DB.prepare('DELETE FROM quiz_question WHERE id=?').bind(id).run();
+        await auditLog(env, user, 'QUIZ_Q', { quizAct: 'delete', qid: id });
+        return corsResponse({ ok: true });
+      }
+      if (path === '/quiz/suggest' && request.method === 'GET') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 접근할 수 있습니다.' }, 403);
+        await quizEnsureTables(env);
+        const n = Math.max(1, Math.min(20, parseInt(url.searchParams.get('n') || '10')));
+        const prod = url.searchParams.get('product') || '';
+        const r = await env.DB.prepare(`SELECT * FROM quiz_question WHERE status='approved'${prod ? ' AND product=?' : ''} ORDER BY RANDOM() LIMIT ?`).bind(...(prod ? [prod, n] : [n])).all();
+        return corsResponse({ ok: true, items: (r.results || []) });
+      }
+      if (path === '/quiz/week' && request.method === 'PUT') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 접근할 수 있습니다.' }, 403);
+        await quizEnsureTables(env);
+        const b = await request.json().catch(() => ({}));
+        const week = String(b.week || quizWeekId(Date.now() + 9 * 3600e3)).slice(0, 10);
+        const ids = (Array.isArray(b.question_ids) ? b.question_ids : []).map(x => parseInt(x)).filter(Boolean).slice(0, 20);
+        const opens = Number(b.opens_at) || Date.now();
+        const closes = Number(b.closes_at) || (opens + 7 * 86400000);
+        await env.DB.prepare("INSERT OR REPLACE INTO quiz_week (week,question_ids,opens_at,closes_at,published_by,published_at) VALUES (?,?,?,?,?,?)").bind(week, JSON.stringify(ids), opens, closes, user, Date.now()).run();
+        // 재출제로 빠진 문제의 옛 답변 정리 (통계 왜곡·용량 낭비 방지)
+        try { if (ids.length) await env.DB.prepare(`DELETE FROM quiz_answer WHERE week=? AND question_id NOT IN (${ids.map(() => '?').join(',')})`).bind(week, ...ids).run(); } catch (_) {}
+        await auditLog(env, user, 'QUIZ_WEEK', { week, n: ids.length });
+        try { ctx.waitUntil(quizNotifyTeams(env, week, ids.length, closes)); } catch (_) {}
+        return corsResponse({ ok: true, week, count: ids.length });
+      }
+      if (path === '/quiz/current' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        await quizEnsureTables(env);
+        const now = Date.now();
+        const w = await env.DB.prepare("SELECT * FROM quiz_week WHERE opens_at<=? AND closes_at>=? ORDER BY opens_at DESC LIMIT 1").bind(now, now).first();
+        if (!w) {
+          const S0 = await quizGetSettings(env);
+          let x0 = 0; try { const x = await env.DB.prepare("SELECT SUM(xp) AS s FROM quiz_answer WHERE user=?").bind(user).first(); x0 = Number(x && x.s) || 0; } catch (_) {}
+          const bd0 = await quizBadges(env, user);
+          return corsResponse({ ok: true, week: null, intro: S0.intro, prize: S0.prize, levels: S0.levels, me: { xp: x0, level: quizLevelOf(x0, S0.levels), badges: bd0.badges, streak: bd0.streak } });
+        }
+        let ids = []; try { ids = JSON.parse(w.question_ids || '[]'); } catch (_) {}
+        let questions = [];
+        if (ids.length) { const r = await env.DB.prepare(`SELECT id,product,type,difficulty,question,choices FROM quiz_question WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all(); const map = {}; (r.results || []).forEach(q => map[q.id] = q); questions = ids.map(id => map[id]).filter(Boolean); }
+        // 내 답변은 '현재 출제된 문제셋'에 한해서만 집계 — 재출제로 문제가 바뀌면 옛 답변은 제외(리스트↔결과 불일치 방지)
+        const mineAll = await env.DB.prepare("SELECT question_id,answer,score,xp FROM quiz_answer WHERE week=? AND user=?").bind(w.week, user).all();
+        const idSet = new Set(ids);
+        const mine = { results: (mineAll.results || []).filter(r => idSet.has(r.question_id)) };
+        const answeredIds = (mine.results || []).map(r => r.question_id);
+        const S = await quizGetSettings(env);
+        let myXp = 0; try { const x = await env.DB.prepare("SELECT SUM(xp) AS s FROM quiz_answer WHERE user=?").bind(user).first(); myXp = Number(x && x.s) || 0; } catch (_) {}
+        const bd = await quizBadges(env, user);
+        const nAns = (mine.results || []).length, nQ = questions.length;
+        return corsResponse({ ok: true, week: w.week, opens_at: w.opens_at, closes_at: w.closes_at, questions, totalQ: nQ, answeredCount: nAns, answeredIds, submitted: nAns > 0, complete: nQ > 0 && nAns >= nQ, myAnswers: (mine.results || []), intro: S.intro, prize: S.prize, levels: S.levels, me: { xp: myXp, level: quizLevelOf(myXp, S.levels), badges: bd.badges, streak: bd.streak } });
+      }
+      if (path === '/quiz/submit' && request.method === 'POST') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        await quizEnsureTables(env);
+        const b = await request.json().catch(() => ({}));
+        const now = Date.now();
+        const w = await env.DB.prepare("SELECT * FROM quiz_week WHERE week=?").bind(String(b.week || '')).first();
+        if (!w) return corsResponse({ ok: false, message: '퀴즈 주차를 찾을 수 없습니다.' }, 404);
+        if (now < w.opens_at || now > w.closes_at) return corsResponse({ ok: false, message: '응시 기간이 아닙니다.' }, 400);
+        let ids = []; try { ids = JSON.parse(w.question_ids || '[]'); } catch (_) {}
+        if (!ids.length) return corsResponse({ ok: false, message: '문제가 없습니다.' }, 400);
+        const qr = await env.DB.prepare(`SELECT * FROM quiz_question WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all();
+        const qmap = {}; (qr.results || []).forEach(q => qmap[q.id] = q);
+        const answers = b.answers || {};
+        const S = await quizGetSettings(env);
+        let total = 0, n = 0, xpSum = 0, combo = 0, maxCombo = 0;
+        const results = [];
+        for (const id of ids) {
+          const q = qmap[id]; if (!q) continue;
+          const ua = (answers[id] !== undefined) ? answers[id] : answers[String(id)];
+          const g = gradeQuiz(q, ua);
+          const xp = Math.round((QUIZ_XP_BY_DIFF[q.difficulty] || 10) * g.score / 100);
+          total += g.score; n++; xpSum += xp;
+          if (g.score === 100) { combo++; if (combo > maxCombo) maxCombo = combo; } else combo = 0;
+          results.push({ id, score: g.score, xp, note: g.note || '', answer: q.answer, explanation: q.explanation || '', source: q.source || '', credit: q.credit || '' });
+          await env.DB.prepare("INSERT INTO quiz_answer (week,user,question_id,answer,score,graded_by,note,submitted_at,xp) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(week,user,question_id) DO UPDATE SET answer=excluded.answer,score=excluded.score,graded_by=excluded.graded_by,note=excluded.note,submitted_at=excluded.submitted_at,xp=excluded.xp").bind(w.week, user, id, String(ua == null ? '' : ua).slice(0, 1000), g.score, 'auto', String(g.note || '').slice(0, 80), now, xp).run();
+        }
+        const avg = n ? Math.round(total / n) : 0;
+        // 누적 XP·레벨·뱃지 (즉시 피드백용)
+        let myXp = 0; try { const x = await env.DB.prepare("SELECT SUM(xp) AS s FROM quiz_answer WHERE user=?").bind(user).first(); myXp = Number(x && x.s) || 0; } catch (_) {}
+        const level = quizLevelOf(myXp, S.levels);
+        const bd = await quizBadges(env, user);
+        await auditLog(env, user, 'QUIZ_SUBMIT', { week: w.week, score: avg, quizXp: xpSum });
+        return corsResponse({ ok: true, week: w.week, avg, answered: n, results, xpGained: xpSum, totalXp: myXp, level, maxCombo, comboMsg: maxCombo >= 2 ? String(S.msgs.combo || '').replace('{n}', maxCombo) : '', msg: quizMsgFor(avg, S.msgs), badges: bd.badges, streak: bd.streak });
+      }
+      if (path === '/quiz/me' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        await quizEnsureTables(env);
+        const week = String(url.searchParams.get('week') || '');
+        const w = await env.DB.prepare("SELECT * FROM quiz_week WHERE week=?").bind(week).first();
+        if (!w) return corsResponse({ ok: true, week: null });
+        const closed = Date.now() > w.closes_at;
+        const mine = await env.DB.prepare("SELECT question_id,answer,score,note FROM quiz_answer WHERE week=? AND user=?").bind(week, user).all();
+        let review = null;
+        if (closed) { let ids = []; try { ids = JSON.parse(w.question_ids || '[]'); } catch (_) {} if (ids.length) { const r = await env.DB.prepare(`SELECT id,question,type,choices,answer,explanation,source FROM quiz_question WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all(); review = (r.results || []); } }
+        return corsResponse({ ok: true, week, closed, myAnswers: (mine.results || []), review });
+      }
+      if (path === '/quiz/history' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        await quizEnsureTables(env);
+        const lim = Math.max(1, Math.min(20, parseInt(url.searchParams.get('limit') || '5')));
+        const r = await env.DB.prepare("SELECT a.week, AVG(a.score) AS acc, COUNT(*) AS answered, SUM(a.xp) AS xp, MAX(a.submitted_at) AS last, w.question_ids, w.closes_at FROM quiz_answer a LEFT JOIN quiz_week w ON w.week=a.week WHERE a.user=? GROUP BY a.week ORDER BY a.week DESC LIMIT ?").bind(user, lim).all();
+        const now = Date.now();
+        const rows = (r.results || []).map(x => { let tq = 0; try { tq = JSON.parse(x.question_ids || '[]').length; } catch (_) {} return { week: x.week, acc: Math.round(Number(x.acc) || 0), answered: Number(x.answered) || 0, totalQ: tq, xp: Number(x.xp) || 0, last: x.last, closed: !!(x.closes_at && now > x.closes_at) }; });
+        return corsResponse({ ok: true, rows });
+      }
+      if (path === '/quiz/leaderboard' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        await quizEnsureTables(env);
+        const scope = url.searchParams.get('scope') || 'week';
+        if (scope === 'month') {
+          const kst = new Date(Date.now() + 9 * 3600e3); const ms = Date.UTC(kst.getUTCFullYear(), kst.getUTCMonth(), 1) - 9 * 3600e3; const me = Date.UTC(kst.getUTCFullYear(), kst.getUTCMonth() + 1, 1) - 9 * 3600e3;
+          const r = await env.DB.prepare("SELECT user, AVG(score) AS acc, COUNT(*) AS answered, COUNT(DISTINCT week) AS weeks FROM quiz_answer WHERE submitted_at>=? AND submitted_at<? GROUP BY user").bind(ms, me).all();
+          return corsResponse({ ok: true, scope: 'month', rows: (r.results || []) });
+        }
+        const week = String(url.searchParams.get('week') || quizWeekId(Date.now() + 9 * 3600e3));
+        const w = await env.DB.prepare("SELECT * FROM quiz_week WHERE week=?").bind(week).first();
+        let totalQ = 0; if (w) { try { totalQ = JSON.parse(w.question_ids || '[]').length; } catch (_) {} }
+        const r = await env.DB.prepare("SELECT user, AVG(score) AS acc, COUNT(*) AS answered, SUM(xp) AS wxp, MAX(submitted_at) AS last FROM quiz_answer WHERE week=? GROUP BY user").bind(week).all();
+        // 누적 XP·레벨(성장 축) + 이달 팀 목표 진행률(협동 축)
+        const S = await quizGetSettings(env);
+        const xr = await env.DB.prepare("SELECT user, SUM(xp) AS xp FROM quiz_answer GROUP BY user ORDER BY xp DESC").all();
+        const xpRows = (xr.results || []).map(x => ({ user: x.user, xp: Number(x.xp) || 0, level: quizLevelOf(Number(x.xp) || 0, S.levels).name }));
+        let teamGoal = null;
+        if (S.teamGoal > 0) {
+          const kst = new Date(Date.now() + 9 * 3600e3); const ms = Date.UTC(kst.getUTCFullYear(), kst.getUTCMonth(), 1) - 9 * 3600e3; const me2 = Date.UTC(kst.getUTCFullYear(), kst.getUTCMonth() + 1, 1) - 9 * 3600e3;
+          const t = await env.DB.prepare("SELECT AVG(score) AS acc FROM quiz_answer WHERE submitted_at>=? AND submitted_at<?").bind(ms, me2).first();
+          teamGoal = { goal: S.teamGoal, current: Math.round(Number(t && t.acc) || 0), prize: S.teamGoalPrize || '' };
+        }
+        return corsResponse({ ok: true, scope: 'week', week, totalQ, rows: (r.results || []), xpRows, teamGoal });
+      }
+      if (path === '/quiz/settings' && request.method === 'GET') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 접근할 수 있습니다.' }, 403);
+        return corsResponse({ ok: true, settings: await quizGetSettings(env) });
+      }
+      if (path === '/quiz/settings' && request.method === 'POST') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 접근할 수 있습니다.' }, 403);
+        const b = await request.json().catch(() => ({}));
+        const cur = await quizGetSettings(env);
+        const next = Object.assign({}, cur, b.settings || {});
+        try { await env.DB.prepare("INSERT INTO app_settings (key,value) VALUES ('quiz_settings',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(next)).run(); } catch (_) {}
+        await auditLog(env, user, 'QUIZ_SET', { keys: Object.keys(b.settings || {}).join(',').slice(0, 100) });
+        return corsResponse({ ok: true, settings: next });
+      }
+
+      // \u2500\u2500 \uC2A4\uCF00\uC904 \uBD84\uC11D \uC5D4\uC9C4(B\uC548) \uACB0\uACFC \uC800\uC7A5/\uC870\uD68C : Claude \uC5D0\uC774\uC804\uD2B8\uAC00 \uC4F0\uACE0 \uD300\uC6D0\uC740 \uBDF0\uB9CC \u2500\u2500
+      if (path === '/analysis' && request.method === 'PUT') {
+        const tok = request.headers.get('x-analysis-token') || '';
+        if (!env.ANALYSIS_WRITE_TOKEN || tok !== env.ANALYSIS_WRITE_TOKEN) return corsResponse({ ok: false, message: '\uC778\uC99D \uC2E4\uD328' }, 401);
+        const body = await request.json().catch(() => null);
+        if (!body || !body.built_at || !body.day) return corsResponse({ ok: false, message: 'built_at/day \uD544\uC694' }, 400);
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS analysis_snapshot (kind TEXT NOT NULL, built_at INTEGER NOT NULL, day TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY (kind, built_at))").run();
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS issue_analysis (issue_key TEXT NOT NULL, built_at INTEGER NOT NULL, day TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY (issue_key, built_at))").run();
+          const builtAt = Number(body.built_at); const day = String(body.day).slice(0, 10);
+          let issueN = 0;
+          if (body.team) {
+            await env.DB.prepare("INSERT OR REPLACE INTO analysis_snapshot (kind, built_at, day, payload_json) VALUES ('team', ?, ?, ?)").bind(builtAt, day, JSON.stringify(body.team)).run();
+          }
+          for (const it of (Array.isArray(body.issues) ? body.issues : [])) {
+            if (!it || !/^[A-Z][A-Z0-9]*-\d+$/.test(it.key || '') || !it.payload) continue;
+            await env.DB.prepare("INSERT OR REPLACE INTO issue_analysis (issue_key, built_at, day, payload_json) VALUES (?, ?, ?, ?)").bind(it.key, builtAt, day, JSON.stringify(it.payload)).run();
+            issueN++;
+          }
+          // \uB2F4\uB2F9\uC790 \uC751\uB2F5 \uC9C0\uD45C (\uCF54\uBA58\uD2B8 \uAE30\uBC18, \uC2A4\uCF00\uC904 \uC5D4\uC9C4\uC774 \uACC4\uC0B0\uD574 \uC804\uB2EC)
+          try {
+            if (Array.isArray(body.resp) && body.resp.length) {
+              await env.DB.prepare("CREATE TABLE IF NOT EXISTS issue_resp (issue_key TEXT PRIMARY KEY, assignee TEXT, is_case INTEGER, first_resp REAL, avg_resp REAL, last_comment REAL, comments INTEGER, computed_at INTEGER)").run();
+              // 케이스 회신 주체 컬럼 (구 테이블 호환 — 이미 있으면 에러 무시)
+              try { await env.DB.prepare('ALTER TABLE issue_resp ADD COLUMN last_comm REAL').run(); } catch (_) {}
+              try { await env.DB.prepare('ALTER TABLE issue_resp ADD COLUMN ball TEXT').run(); } catch (_) {}
+              try { await env.DB.prepare('ALTER TABLE issue_resp ADD COLUMN ball_note TEXT').run(); } catch (_) {}
+              try { await env.DB.prepare('ALTER TABLE issue_resp ADD COLUMN is_open INTEGER').run(); } catch (_) {}
+              for (const r of body.resp) {
+                if (!r || !/^[A-Z][A-Z0-9]*-\d+$/.test(r.key || '')) continue;
+                await env.DB.prepare('INSERT INTO issue_resp (issue_key, assignee, is_case, first_resp, avg_resp, last_comment, comments, computed_at, last_comm, ball, ball_note, is_open) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(issue_key) DO UPDATE SET assignee=excluded.assignee, is_case=excluded.is_case, first_resp=excluded.first_resp, avg_resp=excluded.avg_resp, last_comment=excluded.last_comment, comments=excluded.comments, computed_at=excluded.computed_at, last_comm=excluded.last_comm, ball=excluded.ball, ball_note=excluded.ball_note, is_open=excluded.is_open')
+                  .bind(r.key, String(r.assignee || ''), r.isCase ? 1 : 0, r.firstRespDays ?? null, r.avgRespDays ?? null, r.lastCommentDays ?? null, Number(r.comments) || 0, builtAt, r.lastCommDays ?? null, String(r.ball || ''), String(r.ballNote || '').slice(0, 160), r.isOpen ? 1 : 0).run();
+              }
+            }
+          } catch (_) {}
+          const cutoff = Date.now() - 180 * 86400000;   // \uBCF4\uC874 180\uC77C
+          try { await env.DB.prepare('DELETE FROM issue_analysis WHERE built_at < ?').bind(cutoff).run(); await env.DB.prepare('DELETE FROM analysis_snapshot WHERE built_at < ?').bind(cutoff).run(); } catch (_) {}
+          try {
+            await env.DB.prepare("CREATE TABLE IF NOT EXISTS analysis_request (issue_key TEXT PRIMARY KEY, requested_at INTEGER, requested_by TEXT)").run();
+            for (const it of (Array.isArray(body.issues) ? body.issues : [])) { if (it && it.key) await env.DB.prepare('DELETE FROM analysis_request WHERE issue_key = ?').bind(it.key).run(); }
+          } catch (_) {}
+          // 실제 마지막 분석(증분) 실행 시각 기록 — team 갱신이 없어도 매 PUT마다
+          try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)").run(); await env.DB.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('analysis_last_run', ?)").bind(String(builtAt)).run(); } catch (_) {}
+          await auditLog(env, 'analysis-agent', 'ANALYSIS_RUN', { issues: issueN, hasTeam: !!body.team, day });
+          return corsResponse({ ok: true, issues: issueN, team: !!body.team });
+        } catch (e) {
+          await auditLog(env, 'analysis-agent', 'ANALYSIS_FAIL', { message: String(e && e.message || e).slice(0, 200) });
+          return corsResponse({ ok: false, message: '\uC800\uC7A5 \uC2E4\uD328: ' + (e && e.message || e) }, 500);
+        }
+      }
+      if (path === '/analysis/latest' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        let team = null, builtAt = null, keys = [];
+        try {
+          const t = await env.DB.prepare("SELECT built_at, day, payload_json FROM analysis_snapshot WHERE kind='team' ORDER BY built_at DESC LIMIT 1").first();
+          if (t) { team = JSON.parse(t.payload_json); builtAt = t.built_at; }
+          const last = await env.DB.prepare('SELECT MAX(built_at) AS b FROM issue_analysis').first();
+          if (last && last.b) {
+            // 증분 분석 지원: 최신 배치만이 아니라 최근 14일 내 분석 이력이 있는 전체 키 반환
+            const r = await env.DB.prepare('SELECT DISTINCT issue_key FROM issue_analysis WHERE built_at >= ?').bind(Date.now() - 14 * 86400000).all();
+            keys = (r.results || []).map(x => x.issue_key);
+            if (!builtAt) builtAt = last.b;
+          }
+        } catch (_) {}
+        let archive = null;
+        try { archive = await buildArchiveUpdates(env, 7); } catch (_) {}
+        let lastRun = null;
+        try { const lr = await env.DB.prepare("SELECT value FROM app_settings WHERE key='analysis_last_run'").first(); if (lr && lr.value) lastRun = Number(lr.value); } catch (_) {}
+        return corsResponse({ ok: true, built_at: builtAt, last_run: lastRun, team, issueKeys: keys, archive });
+      }
+      if (path === '/analysis/resp' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        let items = [];
+        try { const r = await env.DB.prepare('SELECT issue_key AS key, assignee, is_case, first_resp, avg_resp, last_comment, comments, computed_at, last_comm, ball, ball_note, is_open FROM issue_resp WHERE computed_at >= ?').bind(Date.now() - 30 * 86400000).all(); items = r.results || []; } catch (_) {}
+        return corsResponse({ ok: true, items });
+      }
+      if (path.startsWith('/analysis/issue/') && request.method === 'GET') {
+        // 분석 엔진도 읽어야 한다 — 「막둥」 답변을 누적하려면 기존 payload.qa 를 먼저 확보해야 함.
+        const anaOkI = !!env.ANALYSIS_WRITE_TOKEN && (request.headers.get('x-analysis-token') || '') === env.ANALYSIS_WRITE_TOKEN;
+        if (!hasSession && !anaOkI) return corsResponse({ ok: false, message: '\uB85C\uADF8\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.' }, 401);
+        const key = decodeURIComponent(path.split('/')[3] || '');
+        if (!/^[A-Z][A-Z0-9]*-\d+$/.test(key)) return corsResponse({ ok: false, message: '\uC798\uBABB\uB41C \uC774\uC288 \uD0A4' }, 400);
+        let row = null;
+        try { const r = await env.DB.prepare('SELECT built_at, day, payload_json FROM issue_analysis WHERE issue_key = ? ORDER BY built_at DESC LIMIT 1').bind(key).first(); if (r) row = { built_at: r.built_at, day: r.day, ...JSON.parse(r.payload_json) }; } catch (_) {}
+        return corsResponse({ ok: true, key, analysis: row });
+      }
+      if (path.startsWith('/analysis/request/') && request.method === 'POST') {
+        if (!hasSession || !await isAdmin(env, user)) return corsResponse({ ok: false, message: '관리자만 가능합니다.' }, 403);
+        const key = decodeURIComponent(path.split('/')[3] || '');
+        if (!/^[A-Z][A-Z0-9]*-\d+$/.test(key)) return corsResponse({ ok: false, message: '잘못된 이슈 키' }, 400);
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS analysis_request (issue_key TEXT PRIMARY KEY, requested_at INTEGER, requested_by TEXT)").run();
+          await env.DB.prepare('INSERT OR REPLACE INTO analysis_request (issue_key, requested_at, requested_by) VALUES (?, ?, ?)').bind(key, Date.now(), user).run();
+          await auditLog(env, user, 'ANALYSIS_REQ', { reqKey: key });
+          return corsResponse({ ok: true });
+        } catch (e) { return corsResponse({ ok: false, message: '요청 실패: ' + (e && e.message || e) }, 500); }
+      }
+      if (path === '/analysis/requests' && request.method === 'GET') {
+        const tok = request.headers.get('x-analysis-token') || '';
+        if (!env.ANALYSIS_WRITE_TOKEN || tok !== env.ANALYSIS_WRITE_TOKEN) return corsResponse({ ok: false, message: '인증 실패' }, 401);
+        let keys = [];
+        try { const r = await env.DB.prepare('SELECT issue_key FROM analysis_request ORDER BY requested_at ASC').all(); keys = (r.results || []).map(x => x.issue_key); } catch (_) {}
+        return corsResponse({ ok: true, keys });
+      }
+
+      // ── 고객사 담당자 관리 (정/부 담당 + 계약여부) : 조회=세션(영업 포함), 수정=관리자 ──
+      // 이슈·지원건·영업에 담당 메타를 자동 반영하기 위한 단일 소스.
+      if (path === '/customer/owners' && request.method === 'GET') {
+        const anaOkO = !!env.ANALYSIS_WRITE_TOKEN && (request.headers.get('x-analysis-token') || '') === env.ANALYSIS_WRITE_TOKEN;
+        if (!hasSession && !anaOkO) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        let items = [];
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS customer_owner (customer TEXT PRIMARY KEY, primary_owner TEXT NOT NULL DEFAULT '', secondary_owner TEXT NOT NULL DEFAULT '', products TEXT NOT NULL DEFAULT '', support TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, updated_by TEXT, updated_at INTEGER)").run();
+          try { await env.DB.prepare("ALTER TABLE customer_owner ADD COLUMN sales_owner TEXT NOT NULL DEFAULT ''").run(); } catch (_) {}
+          try { await env.DB.prepare("ALTER TABLE customer_owner ADD COLUMN users INTEGER DEFAULT 0").run(); } catch (_) {}
+          const r = await env.DB.prepare('SELECT customer, primary_owner, secondary_owner, sales_owner, products, support, active, users, updated_by, updated_at FROM customer_owner ORDER BY active DESC, customer').all();
+          items = r.results || [];
+        } catch (_) {}
+        return corsResponse({ ok: true, items });
+      }
+      if (path === '/customer/owner' && request.method === 'PUT') {
+        // 관리자 또는 분석 토큰(시드). 계약종료·담당 변경은 관리자.
+        const anaOkO = !!env.ANALYSIS_WRITE_TOKEN && (request.headers.get('x-analysis-token') || '') === env.ANALYSIS_WRITE_TOKEN;
+        if (!anaOkO && (!hasSession || !await isAdmin(env, user))) return corsResponse({ ok: false, message: '관리자만 수정할 수 있습니다.' }, 403);
+        const b = await request.json().catch(() => ({}));
+        const customer = String(b.customer || '').trim().slice(0, 80);
+        if (!customer) return corsResponse({ ok: false, message: '고객사명이 필요합니다.' }, 400);
+        const actor = (anaOkO && !hasSession) ? 'seed(엑셀)' : user;
+        const isSeed = anaOkO && !hasSession;
+        // 시드(엑셀)는 빈 값이면 기존값 보존, 관리자 편집은 직접 덮어씀(제품·지원·영업담당 편집 가능)
+        const keepIfEmpty = (col) => `CASE WHEN excluded.${col}!='' THEN excluded.${col} ELSE customer_owner.${col} END`;
+        const prodSet = isSeed ? keepIfEmpty('products') : 'excluded.products';
+        const suppSet = isSeed ? keepIfEmpty('support') : 'excluded.support';
+        const salesSet = isSeed ? keepIfEmpty('sales_owner') : 'excluded.sales_owner';
+        const usersSet = 'CASE WHEN excluded.users IS NOT NULL THEN excluded.users ELSE customer_owner.users END';
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS customer_owner (customer TEXT PRIMARY KEY, primary_owner TEXT NOT NULL DEFAULT '', secondary_owner TEXT NOT NULL DEFAULT '', products TEXT NOT NULL DEFAULT '', support TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, updated_by TEXT, updated_at INTEGER)").run();
+          try { await env.DB.prepare("ALTER TABLE customer_owner ADD COLUMN sales_owner TEXT NOT NULL DEFAULT ''").run(); } catch (_) {}
+          try { await env.DB.prepare("ALTER TABLE customer_owner ADD COLUMN users INTEGER DEFAULT 0").run(); } catch (_) {}
+          await env.DB.prepare(`INSERT INTO customer_owner (customer, primary_owner, secondary_owner, sales_owner, products, support, active, users, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(customer) DO UPDATE SET primary_owner=excluded.primary_owner, secondary_owner=excluded.secondary_owner, sales_owner=${salesSet}, products=${prodSet}, support=${suppSet}, active=excluded.active, users=${usersSet}, updated_by=excluded.updated_by, updated_at=excluded.updated_at`)
+            .bind(customer, String(b.primary || '').slice(0, 40), String(b.secondary || '').slice(0, 40), String(b.sales_owner || '').slice(0, 40), String(b.products || '').slice(0, 120), String(b.support || '').slice(0, 40), b.active === false || b.active === 0 ? 0 : 1, (b.users===undefined?null:(parseInt(b.users,10)||0)), actor, Date.now()).run();
+          if (!isSeed) await auditLog(env, user, 'CUST_OWNER', { ownerCustomer: customer, ownerActive: b.active === false ? 0 : 1 });
+          return corsResponse({ ok: true });
+        } catch (e) { return corsResponse({ ok: false, message: '저장 실패: ' + (e && e.message || e) }, 500); }
+      }
+
+      // ── 고객사 환경/사용 솔루션 (IA 재편) : 조회=세션(영업 포함), 수정=기술팀·관리자 ──
+      if (path === '/customer/env' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        const name = (url.searchParams.get('name') || '').trim().slice(0, 80);
+        if (!name) return corsResponse({ ok: false, message: '고객사명이 필요합니다.' }, 400);
+        let row = null;
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS customer_env (customer TEXT PRIMARY KEY, solutions TEXT NOT NULL DEFAULT '', env_note TEXT NOT NULL DEFAULT '', updated_by TEXT, updated_at INTEGER)").run();
+          row = await env.DB.prepare('SELECT customer, solutions, env_note, updated_by, updated_at FROM customer_env WHERE customer = ?').bind(name).first();
+        } catch (_) {}
+        return corsResponse({ ok: true, env: row || null });
+      }
+      if (path === '/customer/env' && request.method === 'PUT') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        if (await isSalesRole(env, user)) return corsResponse({ ok: false, message: '환경 정보는 기술팀만 수정할 수 있습니다.' }, 403);
+        const body = await request.json().catch(() => ({}));
+        const customer = String(body.customer || '').trim().slice(0, 80);
+        if (!customer) return corsResponse({ ok: false, message: '고객사명이 필요합니다.' }, 400);
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS customer_env (customer TEXT PRIMARY KEY, solutions TEXT NOT NULL DEFAULT '', env_note TEXT NOT NULL DEFAULT '', updated_by TEXT, updated_at INTEGER)").run();
+          await env.DB.prepare('INSERT INTO customer_env (customer, solutions, env_note, updated_by, updated_at) VALUES (?,?,?,?,?) ON CONFLICT(customer) DO UPDATE SET solutions=excluded.solutions, env_note=excluded.env_note, updated_by=excluded.updated_by, updated_at=excluded.updated_at')
+            .bind(customer, String(body.solutions || '').slice(0, 500), String(body.env_note || '').slice(0, 3000), user, Date.now()).run();
+          await auditLog(env, user, 'CUST_ENV', { envCustomer: customer });
+          return corsResponse({ ok: true });
+        } catch (e) { return corsResponse({ ok: false, message: '저장 실패: ' + (e && e.message || e) }, 500); }
+      }
+
+      // ── STEP 6 영업 현황 : 규칙 기반 집계(AI 무관), 이슈 본문·코멘트는 반환하지 않음 ──
+      if (path === '/sales/overview' && request.method === 'GET') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        try {
+          const data = await buildSalesOverview(env);
+          return corsResponse(data);
+        } catch (e) { return corsResponse({ ok: false, message: '집계 실패: ' + (e && e.message || e) }, 500); }
+      }
+      if (path === '/sales/note' && request.method === 'PUT') {
+        if (!hasSession) return corsResponse({ ok: false, message: '로그인이 필요합니다.' }, 401);
+        const salesOk = (await isSalesRole(env, user)) || (await isAdmin(env, user));
+        if (!salesOk) return corsResponse({ ok: false, message: '영업·관리자만 수정할 수 있습니다.' }, 403);
+        const body = await request.json().catch(() => ({}));
+        try {
+          const saved = await saveSalesNote(env, user, body);
+          await auditLog(env, user, 'SALES_NOTE', { noteCustomer: saved.customer, noteProduct: saved.product, noteStatus: saved.status });
+          return corsResponse({ ok: true, saved });
+        } catch (e) { return corsResponse({ ok: false, message: '저장 실패: ' + (e && e.message || e) }, 400); }
+      }
+
       return corsResponse({ ok: false, message: '\uC5C6\uB294 \uACBD\uB85C\uC785\uB2C8\uB2E4.' }, 404);
     } catch (err) {
       return corsResponse({ ok: false, message: err.message || '\uC11C\uBC84 \uC624\uB958' }, 500);
@@ -2579,12 +2126,46 @@ export default {
   },
 
   // \u2500\u2500 Cron Scheduled Handler \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // cron은 30분마다 깨어난다(0,30 * * * *). 각 작업은 KST 시각으로 자기 차례인지 스스로 판단하고,
+  // app_settings의 날짜 마커(claimDailyOnce)로 하루 1회만 실행한다 — cron 지연이 나도 건너뛰지 않게.
   async scheduled(event, env, ctx) {
-    // §3 일일 팀 업무 스냅샷 (08:30 KST = 23:30 UTC). KST 전일(완료된 하루) updated 이슈 저장.
-    try {
-      const _kst = new Date(Date.now() + 9 * 3600e3); _kst.setUTCDate(_kst.getUTCDate() - 1);  // 08:30 KST 실행 → 전일을 스냅샷(당일은 00:00~08:30분만이라 거의 공백)
-      const kstDay = _kst.toISOString().slice(0, 10);
-      ctx.waitUntil(buildDailySnapshot(env, kstDay));
-    } catch (_) {}
+    const kst = new Date(Date.now() + 9 * 3600e3);
+    const kstDay = kst.toISOString().slice(0, 10);
+    const nowMin = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+    const due = (targetMin) => nowMin >= targetMin && nowMin < targetMin + 120;   // 목표시각 후 2시간 이내에만(지연 보정, 늦은 시각 기습 발송 방지)
+
+    // §3 일일 팀 업무 스냅샷 + 자료실 KB 증분 — 08:30 KST 고정
+    if (due(8 * 60 + 30)) {
+      ctx.waitUntil((async () => {
+        if (!(await claimDailyOnce(env, 'cron_daily_last', kstDay))) return;
+        try {
+          const _y = new Date(Date.now() + 9 * 3600e3); _y.setUTCDate(_y.getUTCDate() - 1);   // 전일(완료된 하루)을 스냅샷
+          await buildDailySnapshot(env, _y.toISOString().slice(0, 10));
+        } catch (_) {}
+        try { await importRecentKBLinks(env, 'system(cron)', 2, { limit: 120 }); } catch (_) {}
+      })());
+    }
+
+    // 개인별 브리핑 1:1 전달 — 설정된 시각에, 켜져 있을 때만 (전사 채널 게시는 폐지)
+    if (env.TEAMS_WEBHOOK_URL) {
+      ctx.waitUntil((async () => {
+        try {
+          if (!(await getFeatureFlags(env)).digest) return;
+          const sch = await digestGetSchedule(env);
+          if (!sch.enabled) return;
+          const [sh, sm] = sch.time.split(':').map(Number);
+          if (!due(sh * 60 + sm)) return;
+          if (!(await claimDailyOnce(env, 'digest_last_sent', kstDay))) return;
+          const hub = 'https://engr-jira.github.io/engr-hub-dev/';
+          const noti = (await digestGetNotice(env)).text;
+          const R = await buildPersonalDigests(env, hub, noti);
+          const rcfg = await digestGetRecipients(env);
+          const pol = applyDigestRecipientPolicy(R.recipients, rcfg, env.MAIL_DOMAIN || 'escare.co.kr');
+          if (!pol.send.length) { await auditLog(env, 'system(cron)', 'DIGEST_GEN', { via: 'personal-cron', digDate: R.date, digMode: pol.mode, digTime: sch.time, people: R.recipients.length, willSend: 0, sent: 0 }); return; }
+          const pr = await pushPersonalDigests(env, pol.send);
+          await auditLog(env, 'system(cron)', 'DIGEST_GEN', { via: 'personal-cron', digDate: R.date, digMode: pol.mode, digTime: sch.time, people: R.recipients.length, willSend: pol.send.length, sent: pr.sent, failed: pr.failed });
+        } catch (_) {}
+      })());
+    }
   },
 };
